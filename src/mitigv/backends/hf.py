@@ -228,23 +228,28 @@ class HFMitigator(BaseMitigator):
         before probing attention maps.
         """
         self._saved_attn_impl = None
+        self._attn_impl_saved = False
         layers = self._language_model_layers()
         if len(layers):
             config = getattr(layers[0].self_attn, "config", None)
             if config is not None:
                 self._saved_attn_impl = getattr(config, "_attn_implementation", None)
+                self._attn_impl_saved = True
                 config._attn_implementation = "eager"
 
     def _restore_attention_implementation(self) -> None:
-        """Restore the attention implementation saved by :meth:`_force_eager_attention`."""
-        saved = getattr(self, "_saved_attn_impl", None)
-        if saved is not None:
+        """Restore the attention implementation saved by :meth:`_force_eager_attention`.
+
+        Restores even when the original value was ``None`` (the config default).
+        """
+        if getattr(self, "_attn_impl_saved", False):
             layers = self._language_model_layers()
             if len(layers):
                 config = getattr(layers[0].self_attn, "config", None)
                 if config is not None:
-                    config._attn_implementation = saved
+                    config._attn_implementation = self._saved_attn_impl
         self._saved_attn_impl = None
+        self._attn_impl_saved = False
 
     # -- generation lifecycle hooks -------------------------------------------
     def _on_generate_start(self, cfg: HFMitigatorConfig) -> None:
@@ -267,7 +272,13 @@ class HFMitigator(BaseMitigator):
     def _beam_search_loop(
         self, inputs: dict[str, Any], cfg: HFMitigatorConfig
     ) -> torch.Tensor:
-        """Run greedy beam search and return generated ids ``(B*num_return, T)``."""
+        """Run beam search (log-probability scores, standard EOS semantics).
+
+        Beam scores accumulate ``log_softmax(logits)``, so different prefixes are
+        comparable. A beam that emits EOS is moved to the finished set and is no
+        longer carried forward; its slot is refilled from ``2 * num_beams``
+        candidates. Returns generated ids ``(B*num_return, T)``.
+        """
         batch_size = inputs["input_ids"].shape[0]
         num_beams = cfg.num_beams
         num_return = cfg.num_return_sequences
@@ -287,57 +298,74 @@ class HFMitigator(BaseMitigator):
         is_done = torch.zeros(batch_size * num_beams, dtype=torch.bool, device=device)
         finished: list[list[tuple[float, torch.Tensor]]] = [[] for _ in range(batch_size)]
 
-        batch_offset = torch.arange(batch_size, device=device).unsqueeze(1) * num_beams
         past = None
 
         step = 0
         while step < cfg.max_new_tokens:
-            if cfg.early_stopping and bool(is_done.all()):
+            if cfg.early_stopping and all(len(f) >= num_return for f in finished):
                 break
 
             logits, past = self._step_logits(
                 input_ids, attention_mask, beam_inputs, past, step, cfg
             )
             vocab_size = logits.shape[-1]
+            log_probs = torch.log_softmax(logits, dim=-1)
 
-            scores = logits + beam_scores.unsqueeze(1)  # (B*N, V)
-            scores = scores.masked_fill(is_done.unsqueeze(1), -float("inf"))
-            scores = scores.view(batch_size, num_beams * vocab_size)
-            topk_scores, topk_idx = torch.topk(scores, num_beams, dim=1, largest=True, sorted=True)
+            next_scores = log_probs + beam_scores.unsqueeze(1)  # (B*N, V)
+            next_scores = next_scores.masked_fill(is_done.unsqueeze(1), -float("inf"))
+            next_scores = next_scores.view(batch_size, num_beams * vocab_size)
+            # Take 2*num_beams candidates so finished beams can be refilled.
+            next_scores, next_tokens = torch.topk(
+                next_scores, 2 * num_beams, dim=1, largest=True, sorted=True
+            )
+            next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor")
+            next_tokens = next_tokens % vocab_size
 
-            parent = torch.div(topk_idx, vocab_size, rounding_mode="floor")  # (B, N)
-            token = topk_idx % vocab_size  # (B, N)
-            beam_idx = (batch_offset + parent).view(-1)  # (B*N,) global flat
-            next_tokens = token.view(-1, 1)
+            new_beam_indices: list[int] = []
+            new_token_ids: list[int] = []
+            new_scores: list[float] = []
 
-            full_ids = torch.cat([full_ids[beam_idx], next_tokens], dim=-1)
+            for b in range(batch_size):
+                n_selected = 0
+                for c in range(2 * num_beams):
+                    if n_selected >= num_beams:
+                        break
+                    beam_id = int(next_indices[b, c].item())
+                    token = int(next_tokens[b, c].item())
+                    score = float(next_scores[b, c].item())
+                    flat = b * num_beams + beam_id
+                    if eos is not None and token == eos:
+                        if not bool(is_done[flat]):
+                            seq = full_ids[flat, prompt_len:].clone()
+                            cur_len = seq.numel() + 1
+                            finished[b].append(
+                                (score / (float(cur_len) ** cfg.length_penalty), seq)
+                            )
+                        continue
+                    new_beam_indices.append(flat)
+                    new_token_ids.append(token)
+                    new_scores.append(score)
+                    n_selected += 1
+
+            if not new_beam_indices:
+                break  # every beam finished
+
+            beam_idx = torch.tensor(new_beam_indices, dtype=torch.long, device=device)
+            next_token_t = torch.tensor(new_token_ids, dtype=torch.long, device=device).unsqueeze(1)
+            beam_scores = torch.tensor(new_scores, dtype=torch.float, device=device)
+
+            full_ids = torch.cat([full_ids[beam_idx], next_token_t], dim=-1)
             if attention_mask is not None:
                 ones = torch.ones(
-                    (batch_size * num_beams, 1),
-                    dtype=attention_mask.dtype,
-                    device=device,
+                    (len(beam_idx), 1), dtype=attention_mask.dtype, device=device
                 )
                 attention_mask = torch.cat([attention_mask[beam_idx], ones], dim=-1)
 
             past = self._reorder_cache(past, beam_idx)
             self._reorder_aux_cache(beam_idx)
+            is_done = is_done[beam_idx]  # active beams are never done
 
-            beam_scores = topk_scores.view(-1)
-            is_done = is_done[beam_idx]
-
-            if eos is not None:
-                newly_done = next_tokens.squeeze(1).eq(eos) & ~is_done
-                if bool(newly_done.any()):
-                    cur_len = step + 1
-                    norm = beam_scores[newly_done] / (float(cur_len) ** cfg.length_penalty)
-                    done_seqs = full_ids[newly_done, prompt_len:]
-                    done_flat = torch.nonzero(newly_done, as_tuple=False).squeeze(1)
-                    done_batch = torch.div(done_flat, num_beams, rounding_mode="floor")
-                    for i in range(done_flat.numel()):
-                        finished[int(done_batch[i])].append((norm[i].item(), done_seqs[i]))
-                    is_done = is_done | newly_done
-
-            input_ids = next_tokens  # feed only the new tokens next step (cache)
+            input_ids = next_token_t  # feed only the new tokens next step (cache)
             step += 1
 
         return self._finalize_beams(
@@ -358,7 +386,7 @@ class HFMitigator(BaseMitigator):
         cfg: HFMitigatorConfig,
         device: torch.device,
     ) -> torch.Tensor:
-        """Select the top ``num_return`` beams per batch and pad to equal length."""
+        """Select the top ``num_return`` hypotheses per batch and pad to equal length."""
         gen_len = max(full_ids.shape[1] - prompt_len, 1)
         pad = self._pad_token_id() if self._pad_token_id() is not None else 0
 

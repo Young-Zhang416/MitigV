@@ -352,12 +352,12 @@ text = only(images, prompt)
 
 **OPERA** (Over-trust Penalty and Retrospection-Allocation, Huang et al., CVPR 2024).
 Beam-search decoding that detects the "knowledge aggregation" (columnar
-attention) pattern and penalizes it, with retrospection when the pattern
-persists:
+attention) pattern and penalizes it, then rolls back and re-selects when the
+pattern persists:
 
 ```
-penalty = max_c  ∏_i sigma * attn[i, c]      # column-wise product over a local window
-scores -= penalty_weight * penalty          # over-trust penalty on the beam score
+phi     = max_j  prod_{i=j}^{t-1} sigma * omega[i, j]   # raw column product, FP32
+score   = log_softmax(logits) + beam_score - penalty_weight * phi   # candidate-level
 ```
 
 ```python
@@ -368,9 +368,12 @@ text = opera(images, prompt)
 ```
 
 `OPERAConfig` adds `num_beams` (=5), `sigma` (=50), `penalty_weight` (=1),
-`window_size` (=5), `retrospection_length` (=15) and `retrospection_streak` (=2).
-The over-trust penalty is applied to the beam score; retrospection is implemented
-as score-level suppression of beams whose argmax-penalty column repeats.
+`num_attn_candidates` (=5, top candidates for the cached look-ahead),
+`window_size` (=5), `threshold` (=15, overlap count for retrospection),
+`retrospection_window` (=20) and `max_rollback` (=30). Attention uses max-over-heads
+then re-normalization; the penalty is computed on each candidate's own attention
+via a cached look-ahead forward, and retrospection performs a real rollback
+(snapshot restore + old-candidate exclusion + re-selection).
 
 ## Evaluation
 
