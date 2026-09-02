@@ -8,6 +8,7 @@ it by name.
 from mitigv.algorithms.agla import AGLA, AGLAConfig
 from mitigv.algorithms.icd import ICD, ICDConfig
 from mitigv.algorithms.m3id import M3ID, M3IDConfig
+from mitigv.algorithms.only import ONLY, ONLYConfig
 from mitigv.algorithms.pai import PAI, PAIConfig
 from mitigv.algorithms.probe_steer import LinearProbeSteer, LinearProbeSteerConfig
 from mitigv.algorithms.vcd import VCD, VCDConfig
@@ -21,4 +22,5 @@ __all__ = [
     "VISTA", "VISTAConfig",
     "LinearProbeSteer", "LinearProbeSteerConfig",
     "AGLA", "AGLAConfig",
+    "ONLY", "ONLYConfig",
 ]

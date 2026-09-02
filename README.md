@@ -326,6 +326,28 @@ text = agla(images, prompt)
 estimated from the LVLM's own attention to image tokens (eager attention is
 forced for the probe, then restored).
 
+### Module 12 — `mitigv.algorithms.only`
+
+**ONLY** (One-Layer Intervention, Wan et al., ICCV 2025). At one decoder layer,
+attention heads are ranked by their Text-to-Visual Entropy Ratio (TVER); heads
+below the layer average are deactivated to produce a textually-enhanced logits
+distribution, which is then fused with the original adaptively:
+
+```
+d     = sum_y |p(y) - p~(y)|
+final = f + alpha1 * f~                    if d < gamma   (collaborative)
+final = (1 + alpha2) * f - alpha2 * f~     otherwise      (contrastive)
+```
+
+```python
+from mitigv import build_mitigator
+
+only = build_mitigator("only", model, processor, layer=0, alpha1=3.0, alpha2=1.0, gamma=0.2)
+text = only(images, prompt)
+```
+
+`ONLYConfig` adds `layer`, `alpha1` (=3), `alpha2` (=1) and `gamma` (=0.2).
+
 ## Evaluation
 
 `evaluators/` contains a POPE evaluator that runs the library against the VCD
@@ -361,6 +383,7 @@ src/mitigv/
     vista.py           # module 9: VISTA (Visual Information Steering)
     probe_steer.py     # module 10: LinearProbeSteer (probe-normal steering)
     agla.py            # module 11: AGLA (Assembly of Global and Local Attention)
+    only.py            # module 12: ONLY (One-Layer Intervention)
   api.py               # mitigate() context manager
 evaluators/
   pope.py              # POPE metrics + paper reference + verdict
@@ -378,6 +401,7 @@ tests/
   test_vista.py
   test_probe_steer.py
   test_agla.py
+  test_only.py
   test_beam.py
   test_pope.py
   test_mitigate.py
