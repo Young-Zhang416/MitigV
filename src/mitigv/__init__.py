@@ -58,6 +58,8 @@ __all__ = [
     "AGLAConfig",
     "ONLY",
     "ONLYConfig",
+    "OPERA",
+    "OPERAConfig",
     "__version__",
 ]
 
@@ -80,6 +82,8 @@ _LAZY = {
     "AGLAConfig": ("mitigv.algorithms.agla", "AGLAConfig"),
     "ONLY": ("mitigv.algorithms.only", "ONLY"),
     "ONLYConfig": ("mitigv.algorithms.only", "ONLYConfig"),
+    "OPERA": ("mitigv.algorithms.opera", "OPERA"),
+    "OPERAConfig": ("mitigv.algorithms.opera", "OPERAConfig"),
 }
 
 

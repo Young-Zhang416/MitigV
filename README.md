@@ -348,6 +348,30 @@ text = only(images, prompt)
 
 `ONLYConfig` adds `layer`, `alpha1` (=3), `alpha2` (=1) and `gamma` (=0.2).
 
+### Module 13 — `mitigv.algorithms.opera`
+
+**OPERA** (Over-trust Penalty and Retrospection-Allocation, Huang et al., CVPR 2024).
+Beam-search decoding that detects the "knowledge aggregation" (columnar
+attention) pattern and penalizes it, with retrospection when the pattern
+persists:
+
+```
+penalty = max_c  ∏_i sigma * attn[i, c]      # column-wise product over a local window
+scores -= penalty_weight * penalty          # over-trust penalty on the beam score
+```
+
+```python
+from mitigv import build_mitigator
+
+opera = build_mitigator("opera", model, processor, num_beams=5)
+text = opera(images, prompt)
+```
+
+`OPERAConfig` adds `num_beams` (=5), `sigma` (=50), `penalty_weight` (=1),
+`window_size` (=5), `retrospection_length` (=15) and `retrospection_streak` (=2).
+The over-trust penalty is applied to the beam score; retrospection is implemented
+as score-level suppression of beams whose argmax-penalty column repeats.
+
 ## Evaluation
 
 `evaluators/` contains a POPE evaluator that runs the library against the VCD
@@ -384,6 +408,7 @@ src/mitigv/
     probe_steer.py     # module 10: LinearProbeSteer (probe-normal steering)
     agla.py            # module 11: AGLA (Assembly of Global and Local Attention)
     only.py            # module 12: ONLY (One-Layer Intervention)
+    opera.py           # module 13: OPERA (Over-trust Penalty + Retrospection)
   api.py               # mitigate() context manager
 evaluators/
   pope.py              # POPE metrics + paper reference + verdict
@@ -402,6 +427,7 @@ tests/
   test_probe_steer.py
   test_agla.py
   test_only.py
+  test_opera.py
   test_beam.py
   test_pope.py
   test_mitigate.py
