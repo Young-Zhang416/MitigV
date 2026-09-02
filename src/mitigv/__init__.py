@@ -48,6 +48,8 @@ __all__ = [
     "ICDConfig",
     "PAI",
     "PAIConfig",
+    "M3ID",
+    "M3IDConfig",
     "__version__",
 ]
 
@@ -60,6 +62,8 @@ _LAZY = {
     "ICDConfig": ("mitigv.algorithms.icd", "ICDConfig"),
     "PAI": ("mitigv.algorithms.pai", "PAI"),
     "PAIConfig": ("mitigv.algorithms.pai", "PAIConfig"),
+    "M3ID": ("mitigv.algorithms.m3id", "M3ID"),
+    "M3IDConfig": ("mitigv.algorithms.m3id", "M3IDConfig"),
 }
 
 

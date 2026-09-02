@@ -231,6 +231,29 @@ the text guidance), `beta` (plausibility threshold), `start_layer`/`end_layer`
 `None`). The attention intervention targets Llama-style self-attention and is
 disabled with `alpha=0`.
 
+### Module 8 — `mitigv.algorithms.m3id`
+
+**M3ID** (Multi-Modal Mutual Information Decoding, Favero et al., CVPR 2024).
+Counteracts "conditioning dilution" by contrasting the with-image branch against
+a no-image branch with a weight that *grows* over decoding steps, gated by the
+model's confidence:
+
+```
+gamma_t   = exp(-lambda * t)
+weight_t  = (1 - gamma_t) / gamma_t
+logits    = l_c + 1[max(l_c) < log(alpha)] * weight_t * (l_c - l_u)
+```
+
+```python
+from mitigv import build_mitigator
+
+m3id = build_mitigator("m3id", model, processor, alpha=0.3, forgetting_rate=0.02)
+text = m3id(images, prompt)
+```
+
+`M3IDConfig` adds `alpha` (plausibility threshold, default 0.3; scan 0.2/0.3/0.5)
+and `forgetting_rate` (`lambda`, default 0.02; scan 0.001/0.02/0.03).
+
 ## Evaluation
 
 `evaluators/` contains a POPE evaluator that runs the library against the VCD
@@ -262,6 +285,7 @@ src/mitigv/
     vcd.py             # module 5: VCD (Visual Contrastive Decoding)
     icd.py             # module 6: ICD (Instruction Contrastive Decoding)
     pai.py             # module 7: PAI (Paying More Attention to Image)
+    m3id.py            # module 8: M3ID (Multi-Modal Mutual Information Decoding)
   api.py               # mitigate() context manager
 evaluators/
   pope.py              # POPE metrics + paper reference + verdict
@@ -274,6 +298,7 @@ tests/
   test_vcd.py
   test_icd.py
   test_pai.py
+  test_m3id.py
   test_beam.py
   test_pope.py
   test_mitigate.py
