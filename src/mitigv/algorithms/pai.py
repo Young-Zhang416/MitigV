@@ -164,30 +164,15 @@ class PAI(HFMitigator):
         self._unpatch_attention()
 
     def _attention_layers(self) -> Any:
-        """Return the language model's ``ModuleList`` of decoder layers.
-
-        Handles the two common wrapper shapes across transformers versions:
-        ``model.language_model`` (a ``LlamaForCausalLM``, exposing ``.model.layers``)
-        or ``model.model.language_model`` (a ``LlamaModel``, exposing ``.layers``).
-        """
-        lm = getattr(self.model, "language_model", None)
-        if lm is None:
-            base = getattr(self.model, "model", None)
-            lm = getattr(base, "language_model", None)
-        if lm is None:
+        """Return the language model's ``ModuleList`` of decoder layers."""
+        try:
+            return self._language_model_layers()
+        except RuntimeError as exc:
             raise RuntimeError(
                 "PAI attention intervention needs a language model with a "
                 "``.layers`` self-attention stack (e.g. Llama); set alpha=0 "
                 "to disable it."
-            )
-        holder = getattr(lm, "model", lm)  # LlamaForCausalLM.model -> LlamaModel
-        if not hasattr(holder, "layers"):
-            raise RuntimeError(
-                "PAI attention intervention needs a language model with a "
-                "``.layers`` self-attention stack (e.g. Llama); set alpha=0 "
-                "to disable it."
-            )
-        return holder.layers
+            ) from exc
 
     def _patch_attention(self, cfg: PAIConfig) -> None:
         layers = self._attention_layers()

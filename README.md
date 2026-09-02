@@ -254,6 +254,29 @@ text = m3id(images, prompt)
 `M3IDConfig` adds `alpha` (plausibility threshold, default 0.3; scan 0.2/0.3/0.5)
 and `forgetting_rate` (`lambda`, default 0.02; scan 0.001/0.02/0.03).
 
+### Module 9 — `mitigv.algorithms.vista`
+
+**VISTA** (Visual Information Steering, Li & Shi, ICML 2025). Counteracts the
+dilution of visual information in the residual stream: it extracts a per-layer
+Visual Steering Vector (VSV) as the difference of the residual streams of the
+with-image and no-image prompts, then injects it into every layer during
+decoding:
+
+```
+V_steer^l = F(X_p)^l[last] - F(X_n)^l[last]
+h_t^l     = h_t^l + steer_strength * V_steer^l
+```
+
+```python
+from mitigv import build_mitigator
+
+vista = build_mitigator("vista", model, processor, steer_strength=0.01)
+text = vista(images, prompt)
+```
+
+`VISTAConfig` adds `steer_strength` (λ, default 0.01). Only the VSV component is
+implemented; the paper's logits-level SLA component is left as future work.
+
 ## Evaluation
 
 `evaluators/` contains a POPE evaluator that runs the library against the VCD
@@ -286,6 +309,7 @@ src/mitigv/
     icd.py             # module 6: ICD (Instruction Contrastive Decoding)
     pai.py             # module 7: PAI (Paying More Attention to Image)
     m3id.py            # module 8: M3ID (Multi-Modal Mutual Information Decoding)
+    vista.py           # module 9: VISTA (Visual Information Steering)
   api.py               # mitigate() context manager
 evaluators/
   pope.py              # POPE metrics + paper reference + verdict
@@ -299,6 +323,7 @@ tests/
   test_icd.py
   test_pai.py
   test_m3id.py
+  test_vista.py
   test_beam.py
   test_pope.py
   test_mitigate.py

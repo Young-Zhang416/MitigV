@@ -50,6 +50,8 @@ __all__ = [
     "PAIConfig",
     "M3ID",
     "M3IDConfig",
+    "VISTA",
+    "VISTAConfig",
     "__version__",
 ]
 
@@ -64,6 +66,8 @@ _LAZY = {
     "PAIConfig": ("mitigv.algorithms.pai", "PAIConfig"),
     "M3ID": ("mitigv.algorithms.m3id", "M3ID"),
     "M3IDConfig": ("mitigv.algorithms.m3id", "M3IDConfig"),
+    "VISTA": ("mitigv.algorithms.vista", "VISTA"),
+    "VISTAConfig": ("mitigv.algorithms.vista", "VISTAConfig"),
 }
 
 

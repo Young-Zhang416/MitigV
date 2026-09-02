@@ -195,6 +195,31 @@ class HFMitigator(BaseMitigator):
         branch cache). Called by beam search after reordering the main cache."""
         return None
 
+    def _language_model_layers(self) -> Any:
+        """Return the language model's decoder-layer ``ModuleList`` (e.g. Llama's).
+
+        Resolves the common wrapper shapes across transformers versions —
+        ``model.language_model`` (a ``ForCausalLM`` exposing ``.model.layers``)
+        or ``model.model.language_model`` (a base model exposing ``.layers``) —
+        and returns the ``.layers`` holder. Raises if none is found.
+        """
+        lm = getattr(self.model, "language_model", None)
+        if lm is None:
+            base = getattr(self.model, "model", None)
+            lm = getattr(base, "language_model", None)
+        if lm is None:
+            raise RuntimeError(
+                f"{type(self).__name__} requires a language model with a "
+                "'.layers' decoder stack (e.g. Llama)."
+            )
+        holder = getattr(lm, "model", lm)  # ForCausalLM.model -> base model
+        if not hasattr(holder, "layers"):
+            raise RuntimeError(
+                f"{type(self).__name__} requires a language model with a "
+                "'.layers' decoder stack (e.g. Llama)."
+            )
+        return holder.layers
+
     # -- generation lifecycle hooks -------------------------------------------
     def _on_generate_start(self, cfg: HFMitigatorConfig) -> None:
         """Hook called once per generation, after inputs are prepared and the
