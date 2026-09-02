@@ -232,3 +232,32 @@ class TestHFMitigator:
 
         assert mitigv.HFMitigator is HFMitigator
         assert mitigv.HFMitigatorConfig is HFMitigatorConfig
+
+    def test_generate_lifecycle_hooks_called_in_order(self):
+        events = []
+
+        class Hooked(HFMitigator):
+            def _on_generate_start(self, cfg):
+                events.append("start")
+
+            def _on_generate_end(self):
+                events.append("end")
+
+        m = Hooked(ScriptedModel([1], 6), DummyProcessor(VOCAB), max_new_tokens=1)
+        assert m(None, "a") == "a"
+        assert events == ["start", "end"]
+
+    def test_generate_lifecycle_end_runs_on_error(self):
+        events = []
+
+        class Boom(HFMitigator):
+            def _step_logits(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+            def _on_generate_end(self):
+                events.append("end")
+
+        m = Boom(ScriptedModel([1], 6), DummyProcessor(VOCAB), max_new_tokens=1)
+        with pytest.raises(RuntimeError, match="boom"):
+            m(None, "a")
+        assert events == ["end"]

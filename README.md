@@ -3,7 +3,8 @@
 A library of **training-free** hallucination mitigation algorithms for large
 vision-language models (LVLMs). Instead of fine-tuning, these methods re-write
 the decoding process (logits, attention, or sampling) at generation time.
-Planned algorithms include **VCD** (Visual Contrastive Decoding) and **PAI**.
+Implemented algorithms: **VCD** (Visual Contrastive Decoding), **ICD**
+(Instruction Contrastive Decoding) and **PAI** (Paying More Attention to Image).
 
 ## Quick start
 
@@ -203,6 +204,33 @@ text = icd(images, prompt)
 `ICDConfig` adds `lam` (contrast strength, λ=1.0), `alpha` (plausibility
 threshold, α=0.1) and `disturbance_prefix`.
 
+### Module 7 — `mitigv.algorithms.pai`
+
+**PAI** (Paying More Attention to Image, Liu et al., ECCV 2024). Two coordinated
+interventions: it amplifies the image-token attention of the newest query token
+during decoding (weight `alpha`), and contrasts the logits against a *text-only*
+branch — the same prompt with the image removed — to counter the language prior
+("text inertia"):
+
+```
+A[:, :, -1, img_start:img_end] = |A[...]| * alpha + A[...]   # pre-softmax, layers [start_layer, end_layer)
+logits = gamma * (logits(image) - logits(text)) + logits(text)
+# + adaptive plausibility: mask tokens whose *with-image* probability < beta * max
+```
+
+```python
+from mitigv import build_mitigator
+
+pai = build_mitigator("pai", model, processor, alpha=0.2, gamma=1.1)
+text = pai(images, prompt)
+```
+
+`PAIConfig` adds `alpha` (attention scale), `gamma` (guidance scale, `1` disables
+the text guidance), `beta` (plausibility threshold), `start_layer`/`end_layer`
+(attention-intervention layer range) and `num_image_tokens` (auto-detected when
+`None`). The attention intervention targets Llama-style self-attention and is
+disabled with `alpha=0`.
+
 ## Evaluation
 
 `evaluators/` contains a POPE evaluator that runs the library against the VCD
@@ -233,6 +261,8 @@ src/mitigv/
     __init__.py
     vcd.py             # module 5: VCD (Visual Contrastive Decoding)
     icd.py             # module 6: ICD (Instruction Contrastive Decoding)
+    pai.py             # module 7: PAI (Paying More Attention to Image)
+  api.py               # mitigate() context manager
 evaluators/
   pope.py              # POPE metrics + paper reference + verdict
   run_pope.py          # end-to-end POPE validation driver
@@ -243,8 +273,10 @@ tests/
   test_perturbations.py
   test_vcd.py
   test_icd.py
+  test_pai.py
   test_beam.py
   test_pope.py
+  test_mitigate.py
 ```
 
 ## Development

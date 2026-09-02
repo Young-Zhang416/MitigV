@@ -46,6 +46,8 @@ __all__ = [
     "VCDConfig",
     "ICD",
     "ICDConfig",
+    "PAI",
+    "PAIConfig",
     "__version__",
 ]
 
@@ -56,6 +58,8 @@ _LAZY = {
     "VCDConfig": ("mitigv.algorithms.vcd", "VCDConfig"),
     "ICD": ("mitigv.algorithms.icd", "ICD"),
     "ICDConfig": ("mitigv.algorithms.icd", "ICDConfig"),
+    "PAI": ("mitigv.algorithms.pai", "PAI"),
+    "PAIConfig": ("mitigv.algorithms.pai", "PAIConfig"),
 }
 
 

@@ -92,11 +92,15 @@ class HFMitigator(BaseMitigator):
         inputs = self._prepare_inputs(images, prompt, cfg)
         if hasattr(self.model, "eval"):
             self.model.eval()
-        with torch.no_grad():
-            if cfg.num_beams > 1:
-                generated_ids = self._beam_search_loop(inputs, cfg)
-            else:
-                generated_ids = self._decode_loop(inputs, cfg)
+        self._on_generate_start(cfg)
+        try:
+            with torch.no_grad():
+                if cfg.num_beams > 1:
+                    generated_ids = self._beam_search_loop(inputs, cfg)
+                else:
+                    generated_ids = self._decode_loop(inputs, cfg)
+        finally:
+            self._on_generate_end()
         return self._decode(generated_ids)
 
     # -- input preparation ----------------------------------------------------
@@ -189,6 +193,24 @@ class HFMitigator(BaseMitigator):
     def _reorder_aux_cache(self, beam_idx: torch.Tensor) -> None:
         """Hook for subclasses with extra per-beam state (e.g. VCD's distorted
         branch cache). Called by beam search after reordering the main cache."""
+        return None
+
+    # -- generation lifecycle hooks -------------------------------------------
+    def _on_generate_start(self, cfg: HFMitigatorConfig) -> None:
+        """Hook called once per generation, after inputs are prepared and the
+        model is set to eval mode, but before the decode loop.
+
+        Subclasses may patch model internals here (e.g. PAI's attention
+        intervention). ``cfg`` is the effective config for this call.
+        """
+        return None
+
+    def _on_generate_end(self) -> None:
+        """Hook called once per generation, after the decode loop.
+
+        Always runs (also on error) so subclasses can restore anything patched
+        in :meth:`_on_generate_start`.
+        """
         return None
 
     def _beam_search_loop(

@@ -6,6 +6,7 @@ it by name.
 """
 
 from mitigv.algorithms.icd import ICD, ICDConfig
+from mitigv.algorithms.pai import PAI, PAIConfig
 from mitigv.algorithms.vcd import VCD, VCDConfig
 
-__all__ = ["VCD", "VCDConfig", "ICD", "ICDConfig"]
+__all__ = ["VCD", "VCDConfig", "ICD", "ICDConfig", "PAI", "PAIConfig"]
