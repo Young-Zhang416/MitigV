@@ -304,6 +304,28 @@ and `layer` (the decoder layer the probe was trained on). The probe is fit by
 `evaluators/train_probe.py` on ~2000 COCO images (~30 min, single GPU); no model
 weight is updated.
 
+### Module 11 — `mitigv.algorithms.agla`
+
+**AGLA** (Assembly of Global and Local Attention, Zhou et al., 2024). Fuses the
+original image's generative global view with a saliency-cropped local view's
+discriminative logits:
+
+```
+logits = logit(global) + alpha * logit(local)
+```
+
+```python
+from mitigv import build_mitigator
+
+agla = build_mitigator("agla", model, processor, alpha=1.0, crop_ratio=0.5)
+text = agla(images, prompt)
+```
+
+`AGLAConfig` adds `alpha` (local-logits weight, default 1.0) and `crop_ratio`
+(crop side as a fraction of the shorter edge, default 0.5). The saliency map is
+estimated from the LVLM's own attention to image tokens (eager attention is
+forced for the probe, then restored).
+
 ## Evaluation
 
 `evaluators/` contains a POPE evaluator that runs the library against the VCD
@@ -338,6 +360,7 @@ src/mitigv/
     m3id.py            # module 8: M3ID (Multi-Modal Mutual Information Decoding)
     vista.py           # module 9: VISTA (Visual Information Steering)
     probe_steer.py     # module 10: LinearProbeSteer (probe-normal steering)
+    agla.py            # module 11: AGLA (Assembly of Global and Local Attention)
   api.py               # mitigate() context manager
 evaluators/
   pope.py              # POPE metrics + paper reference + verdict
@@ -354,6 +377,7 @@ tests/
   test_m3id.py
   test_vista.py
   test_probe_steer.py
+  test_agla.py
   test_beam.py
   test_pope.py
   test_mitigate.py

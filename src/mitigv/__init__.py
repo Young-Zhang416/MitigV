@@ -54,6 +54,8 @@ __all__ = [
     "VISTAConfig",
     "LinearProbeSteer",
     "LinearProbeSteerConfig",
+    "AGLA",
+    "AGLAConfig",
     "__version__",
 ]
 
@@ -72,6 +74,8 @@ _LAZY = {
     "VISTAConfig": ("mitigv.algorithms.vista", "VISTAConfig"),
     "LinearProbeSteer": ("mitigv.algorithms.probe_steer", "LinearProbeSteer"),
     "LinearProbeSteerConfig": ("mitigv.algorithms.probe_steer", "LinearProbeSteerConfig"),
+    "AGLA": ("mitigv.algorithms.agla", "AGLA"),
+    "AGLAConfig": ("mitigv.algorithms.agla", "AGLAConfig"),
 }
 
 

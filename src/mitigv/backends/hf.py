@@ -220,6 +220,32 @@ class HFMitigator(BaseMitigator):
             )
         return holder.layers
 
+    def _force_eager_attention(self) -> None:
+        """Force eager attention so ``output_attentions`` materializes real weights.
+
+        Saves the previous implementation so :meth:`_restore_attention_implementation`
+        can revert it. Attention-based algorithms (OPERA/AGLA/ONLY) call this
+        before probing attention maps.
+        """
+        self._saved_attn_impl = None
+        layers = self._language_model_layers()
+        if len(layers):
+            config = getattr(layers[0].self_attn, "config", None)
+            if config is not None:
+                self._saved_attn_impl = getattr(config, "_attn_implementation", None)
+                config._attn_implementation = "eager"
+
+    def _restore_attention_implementation(self) -> None:
+        """Restore the attention implementation saved by :meth:`_force_eager_attention`."""
+        saved = getattr(self, "_saved_attn_impl", None)
+        if saved is not None:
+            layers = self._language_model_layers()
+            if len(layers):
+                config = getattr(layers[0].self_attn, "config", None)
+                if config is not None:
+                    config._attn_implementation = saved
+        self._saved_attn_impl = None
+
     # -- generation lifecycle hooks -------------------------------------------
     def _on_generate_start(self, cfg: HFMitigatorConfig) -> None:
         """Hook called once per generation, after inputs are prepared and the

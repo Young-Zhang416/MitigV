@@ -5,6 +5,7 @@ the global registry, after which :func:`mitigv.build_mitigator` can instantiate
 it by name.
 """
 
+from mitigv.algorithms.agla import AGLA, AGLAConfig
 from mitigv.algorithms.icd import ICD, ICDConfig
 from mitigv.algorithms.m3id import M3ID, M3IDConfig
 from mitigv.algorithms.pai import PAI, PAIConfig
@@ -19,4 +20,5 @@ __all__ = [
     "M3ID", "M3IDConfig",
     "VISTA", "VISTAConfig",
     "LinearProbeSteer", "LinearProbeSteerConfig",
+    "AGLA", "AGLAConfig",
 ]
