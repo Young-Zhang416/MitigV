@@ -277,6 +277,33 @@ text = vista(images, prompt)
 `VISTAConfig` adds `steer_strength` (λ, default 0.01). Only the VSV component is
 implemented; the paper's logits-level SLA component is left as future work.
 
+### Module 10 — `mitigv.algorithms.probe_steer`
+
+**LinearProbeSteer** — a self-implemented representative of the representation
+steering family. A linear probe is trained (on frozen features) to classify
+object presence/absence; its decision normal steers the residual stream:
+
+```
+h_t^layer = h_t^layer + beta * (w / ||w||)
+```
+
+```python
+import torch
+from mitigv import build_mitigator
+
+probe = torch.load("probe.pt")
+steer = build_mitigator(
+    "linear_probe_steer", model, processor,
+    steering_vector=probe["weight"], layer=probe["layer"], beta=5.0,
+)
+text = steer(images, prompt)
+```
+
+`LinearProbeSteerConfig` adds `beta` (injection strength; scan `{2, 5, 8, 12}`)
+and `layer` (the decoder layer the probe was trained on). The probe is fit by
+`evaluators/train_probe.py` on ~2000 COCO images (~30 min, single GPU); no model
+weight is updated.
+
 ## Evaluation
 
 `evaluators/` contains a POPE evaluator that runs the library against the VCD
@@ -310,10 +337,12 @@ src/mitigv/
     pai.py             # module 7: PAI (Paying More Attention to Image)
     m3id.py            # module 8: M3ID (Multi-Modal Mutual Information Decoding)
     vista.py           # module 9: VISTA (Visual Information Steering)
+    probe_steer.py     # module 10: LinearProbeSteer (probe-normal steering)
   api.py               # mitigate() context manager
 evaluators/
   pope.py              # POPE metrics + paper reference + verdict
   run_pope.py          # end-to-end POPE validation driver
+  train_probe.py       # linear object-presence probe training (LinearProbeSteer)
 tests/
   test_base.py
   test_registry.py
@@ -324,6 +353,7 @@ tests/
   test_pai.py
   test_m3id.py
   test_vista.py
+  test_probe_steer.py
   test_beam.py
   test_pope.py
   test_mitigate.py
