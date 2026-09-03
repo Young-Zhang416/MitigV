@@ -53,9 +53,13 @@ from mitigv import mitigate
 from mitigv.algorithms.vcd import VCDConfig
 
 with mitigate("vcd", VCDConfig(alpha=2.0), model=model,
-              processor=processor, device="cuda:0") as decoder:
+              processor=processor, model_type="qwen2.5-vl", device="cuda:0") as decoder:
     caption = decoder(image, prompt, max_new_tokens=64)
 ```
+
+对于直接加载的 HuggingFace LLaVA/Qwen 对象，`load_mitigator` 和
+`mitigate` 也会根据 `model.config.model_type` 自动选择适配器；显式传入
+`model_type` 可避免包装自定义模型时的歧义。
 
 批量输入可传入图像列表和提示词列表；返回值为字符串列表。`num_beams>1` 开启 beam search，`do_sample=True` 开启温度、top-k 或 top-p 采样。设置 `seed` 可复现实验。
 

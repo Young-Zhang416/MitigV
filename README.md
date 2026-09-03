@@ -1,7 +1,7 @@
 # MitigV
 
 <p align="center">
-  <img src="logo.png" alt="MitigV logo" width="520">
+  <img src="https://raw.githubusercontent.com/Young-Zhang416/MitigV/master/logo.png" alt="MitigV logo" width="520">
 </p>
 
 A library of **training-free** hallucination mitigation algorithms for large
@@ -38,17 +38,22 @@ with mitigate("vcd", VCDConfig(alpha=2.0), model=model, processor=processor,
     text = f(images, prompt)
 ```
 
+When passing native HuggingFace LLaVA or Qwen objects, include
+`model_type="llava"` or `model_type="qwen2.5-vl"`; `load_mitigator` and
+`mitigate` also infer these families from `model.config.model_type` when it is
+available. Custom protocol-compatible runtimes do not need a model type.
+
 `mitigate` is a context manager: it builds the algorithm, yields a callable
 mitigator, and on exit restores the model's device and frees CUDA cache.
 
-中文入门与完整示例请参阅 [Tutorial.md](Tutorial.md)。
+中文入门与完整示例请参阅 [Tutorial.md](https://github.com/Young-Zhang416/MitigV/blob/master/Tutorial.md)。
 
 ## Installation
 
 ```bash
-python -m pip install .                    # generic PyTorch backend
-python -m pip install ".[transformers]"   # LLaVA and Qwen2.5-VL
-python -m pip install ".[eval]"           # evaluation commands and dependencies
+python -m pip install mitigv                    # generic PyTorch backend
+python -m pip install "mitigv[transformers]"    # LLaVA and Qwen2.5-VL
+python -m pip install "mitigv[eval]"            # evaluation commands and dependencies
 ```
 
 For development, use `python -m pip install -e ".[test,eval]"`.

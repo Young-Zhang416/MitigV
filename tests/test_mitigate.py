@@ -7,6 +7,7 @@ import torch
 
 from mitigv import load_mitigator, mitigate
 from mitigv.algorithms.vcd import VCD, VCDConfig
+from mitigv.backends.qwen2_5_vl import Qwen2_5VLProcessorAdapter
 
 
 VOCAB = {0: "<pad>", 1: "a", 2: "b"}
@@ -61,6 +62,16 @@ class DummyProcessor:
         ]
 
 
+class QwenLikeProcessor(DummyProcessor):
+    def __init__(self, id_to_token):
+        super().__init__(id_to_token)
+        self.templated_text = None
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.templated_text = messages
+        return "<|vision_start|><|image_pad|><|vision_end|>" + messages[0]["content"][1]["text"]
+
+
 class TestMitigate:
     def test_load_mitigator_is_one_step_api_for_loaded_objects(self):
         decoder = load_mitigator(
@@ -73,6 +84,22 @@ class TestMitigate:
         )
         assert isinstance(decoder, VCD)
         assert decoder(None, "a") == "a"
+
+    def test_load_mitigator_auto_adapts_loaded_qwen_objects(self):
+        model = ScriptedModel([1], 3)
+        model.config = SimpleNamespace(model_type="qwen2_5_vl")
+        processor = QwenLikeProcessor(VOCAB)
+        decoder = load_mitigator(
+            "vcd",
+            model=model,
+            processor=processor,
+            alpha=0.0,
+            beta=0.0,
+            max_new_tokens=1,
+        )
+        assert isinstance(decoder.processor, Qwen2_5VLProcessorAdapter)
+        assert decoder("image", "a") == "a"
+        assert processor.templated_text[0]["content"][0]["type"] == "image"
 
     def test_load_mitigator_requires_a_complete_model_source(self):
         with pytest.raises(ValueError, match="provided together"):

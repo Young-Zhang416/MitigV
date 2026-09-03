@@ -60,13 +60,17 @@ class Qwen2_5VLProcessorAdapter(VisionLanguageProcessorAdapter):
         if isinstance(text, str):
             return self._format_one(text, images)
         if isinstance(text, Sequence):
-            return [self._format_one(item, images) for item in text]
+            image_items = images if isinstance(images, Sequence) and not isinstance(images, (str, bytes)) else None
+            return [
+                self._format_one(item, image_items[index] if image_items is not None and index < len(image_items) else images)
+                for index, item in enumerate(text)
+            ]
         return text
 
     def _format_one(self, text: str, images: Any) -> str:
         # Already-templated Qwen prompts contain the image placeholder and
         # should pass through unchanged.
-        if "<|vision_start|>" in text or "<|image_pad|>" in text:
+        if "<|image_pad|>" in text or "<|video_pad|>" in text:
             return text
         if images is None:
             return text

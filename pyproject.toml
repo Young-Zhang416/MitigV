@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mitigv"
-version = "0.1.0"
+version = "0.1.1"
 description = "Training-free hallucination mitigation algorithms for large vision-language models (VCD, PAI, ...)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,11 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Young-Zhang416/MitigV"
+Repository = "https://github.com/Young-Zhang416/MitigV.git"
+Issues = "https://github.com/Young-Zhang416/MitigV/issues"
 
 [project.optional-dependencies]
 transformers = [

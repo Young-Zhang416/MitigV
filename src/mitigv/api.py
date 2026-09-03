@@ -12,6 +12,36 @@ from mitigv.core.registry import build_mitigator
 __all__ = ["load_mitigator", "mitigate"]
 
 
+def _infer_model_type(model: Any, processor: Any) -> str | None:
+    """Infer a supported HF model family from loaded objects when possible.
+
+    Native Qwen processors require a chat template to insert image placeholder
+    tokens.  High-level APIs therefore auto-adapt known HuggingFace objects
+    even when callers omit ``model_type``.  Unknown/custom runtimes return
+    ``None`` and continue through the framework-neutral protocol unchanged.
+    """
+
+    candidates: list[str] = []
+    config = getattr(model, "config", None)
+    configured_type = getattr(config, "model_type", None)
+    if isinstance(configured_type, str):
+        candidates.append(configured_type)
+    candidates.extend(
+        [
+            type(model).__name__,
+            type(getattr(model, "model", None)).__name__,
+            type(processor).__name__,
+            type(getattr(processor, "processor", None)).__name__,
+        ]
+    )
+    normalized = " ".join(candidates).lower().replace("-", "_")
+    if "qwen2_5_vl" in normalized or "qwen2.5_vl" in normalized:
+        return "qwen2.5-vl"
+    if "llava" in normalized:
+        return "llava"
+    return None
+
+
 def load_mitigator(
     algorithm: str,
     *,
@@ -26,9 +56,10 @@ def load_mitigator(
 ) -> BaseMitigator:
     """Create a ready-to-use mitigator from objects or a model checkpoint.
 
-    Pass ``model`` and ``processor`` for any protocol-compatible runtime. Set
-    ``model_type`` as well to wrap already-loaded LLaVA or Qwen objects. To load
-    a HuggingFace checkpoint in one call, pass ``model_type`` and ``model_id``.
+    Pass ``model`` and ``processor`` for any protocol-compatible runtime. Loaded
+    HuggingFace LLaVA/Qwen objects are adapted automatically; set ``model_type``
+    explicitly when desired. To load a checkpoint in one call, pass
+    ``model_type`` and ``model_id``.
     """
 
     supplied_objects = model is not None or processor is not None
@@ -39,15 +70,28 @@ def load_mitigator(
             raise ValueError("model_id cannot be combined with loaded model objects")
         if model_kwargs:
             raise ValueError("model_kwargs cannot be applied to an already-loaded model")
+        if model_type is None:
+            model_type = _infer_model_type(model, processor)
         if model_type is not None:
             from mitigv.backends.factory import adapt_vision_language
-
-            model, processor = adapt_vision_language(
-                model_type,
-                model,
-                processor,
-                processor_kwargs=processor_kwargs,
+            from mitigv.backends.hf_common import (
+                VisionLanguageModelAdapter,
+                VisionLanguageProcessorAdapter,
             )
+
+            if not isinstance(model, VisionLanguageModelAdapter) or not isinstance(
+                processor, VisionLanguageProcessorAdapter
+            ):
+                model, processor = adapt_vision_language(
+                    model_type,
+                    model,
+                    processor,
+                    processor_kwargs=processor_kwargs,
+                )
+            elif processor_kwargs:
+                raise ValueError(
+                    "processor_kwargs cannot be applied to an already-adapted processor"
+                )
         elif processor_kwargs:
             raise ValueError(
                 "processor_kwargs require model_type when adapting loaded objects"
