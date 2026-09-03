@@ -64,3 +64,23 @@ def test_qwen_model_forwards_rope_inputs():
     ids = torch.ones(1, 1, dtype=torch.long)
     adapter(input_ids=ids, image_grid_thw=torch.ones(1, 3, dtype=torch.long))
     assert "image_grid_thw" in seen
+
+
+def test_qwen_model_drops_growing_attention_mask_for_cached_steps():
+    seen = []
+
+    class Recording(Model):
+        def __call__(self, **kwargs):
+            seen.append(dict(kwargs))
+            return super().__call__(**kwargs)
+
+    adapter = Qwen2_5VLModelAdapter(Recording())
+    ids = torch.ones(1, 1, dtype=torch.long)
+    adapter(input_ids=ids, attention_mask=torch.ones(1, 1, dtype=torch.long))
+    adapter(
+        input_ids=ids,
+        attention_mask=torch.ones(1, 2, dtype=torch.long),
+        past_key_values=object(),
+    )
+    assert "attention_mask" in seen[0]
+    assert "attention_mask" not in seen[1]

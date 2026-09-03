@@ -34,7 +34,7 @@ from mitigv.core import (
     register_mitigator,
 )
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "BaseMitigator",

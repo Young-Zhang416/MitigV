@@ -30,6 +30,12 @@ class Qwen2_5VLModelAdapter(VisionLanguageModelAdapter):
         # Qwen's model computes 3-D RoPE positions internally from
         # image_grid_thw/mm_token_type_ids. Do not synthesize position_ids; let
         # the model keep its rope_deltas state consistent.
+        # Transformers 5.x builds an internal multimodal causal mask from the
+        # DynamicCache. Passing the generic decoder's growing 2-D mask on cache
+        # steps makes that mask double-count the visual prefix (e.g. 839 vs
+        # 420). The prefill mask is still required; cached steps omit it.
+        if kwargs.get("past_key_values") is not None:
+            kwargs.pop("attention_mask", None)
         kwargs.setdefault("return_dict", True)
         return super()._prepare_model_kwargs(kwargs)
 
