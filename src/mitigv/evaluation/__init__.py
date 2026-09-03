@@ -24,6 +24,8 @@ __all__ = [
     "DoubleJudgeEvaluator",
     "evaluate_double_judge",
     "analyze_length_control",
+    "load_pipeline_records",
+    "evaluate_pipeline_json",
 ]
 
 _LAZY = {
@@ -58,6 +60,8 @@ _LAZY = {
         "mitigv.evaluation.length_analysis",
         "analyze_length_control",
     ),
+    "load_pipeline_records": ("mitigv.evaluation.pipeline", "load_pipeline_records"),
+    "evaluate_pipeline_json": ("mitigv.evaluation.pipeline", "evaluate_pipeline_json"),
 }
 
 

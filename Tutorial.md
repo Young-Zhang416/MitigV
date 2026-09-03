@@ -118,6 +118,36 @@ python -m mitigv.evaluation.chair \
 
 结果包含每图 `mentioned_objects`、`hallucinated`、`recalled`、`missed`，以及 CHAIRs、CHAIRi、object recall/F1、平均词数/句数和 1000 次图像级 bootstrap 的 95% CI。
 
+### 使用样本 JSON 自动生成并评测
+
+对于包含 `image_id`、`file_name` 和 `gt_objects` 的样本文件，可以自动读取图像、
+调用 pipeline 生成描述并运行严格 CHAIR：
+
+```json
+[
+  {"image_id": 184613, "file_name": "COCO_val2014_000000184613.jpg",
+   "gt_objects": ["cow", "person", "umbrella"]}
+]
+```
+
+```python
+from mitigv.evaluation.pipeline import evaluate_pipeline_json
+
+result = evaluate_pipeline_json(
+    "samples.json", vcd, image_root="~/dataset",
+    output_json="results/chair.json",
+)
+```
+
+`gt_objects` 会直接作为每图的 COCO 对象集合，不需要额外 annotations。也可以用
+CLI 从本地 checkpoint 加载模型：
+
+```bash
+mitigv-evaluate-pipeline --input-json samples.json --image-root ~/dataset \
+  --model-type llava --model-id ~/checkpoints/llava-1.5-7b-hf \
+  --output-json results/chair.json
+```
+
 ### DeepSeek + GroundingDINO 补充裁判
 
 先设置 `DEEPSEEK_API_KEY`，再运行：

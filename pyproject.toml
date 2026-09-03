@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mitigv"
-version = "0.1.3"
+version = "0.1.4"
 description = "Training-free hallucination mitigation algorithms for large vision-language models (VCD, PAI, ...)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -60,6 +60,7 @@ mitigv-discriminative = "mitigv.evaluation.discriminative:main"
 mitigv-length-analysis = "mitigv.evaluation.length_analysis:main"
 mitigv-pope = "mitigv.evaluation.run_pope:main"
 mitigv-train-probe = "mitigv.evaluation.train_probe:main"
+mitigv-evaluate-pipeline = "mitigv.evaluation.pipeline:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

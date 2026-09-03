@@ -274,6 +274,27 @@ Prediction items must contain `image_id` and one of `caption`,
 `generated_text`, `text`, `answer`, or `output`. COCO ground truth is the union
 of instance categories and recognized objects in the reference captions.
 
+For prepared records with `image_id`, `file_name`, and `gt_objects`, generate
+captions and run strict CHAIR in one step:
+
+```python
+from mitigv.evaluation.pipeline import evaluate_pipeline_json
+
+result = evaluate_pipeline_json(
+    "samples.json", vcd, image_root="~/dataset",
+    output_json="results/chair.json",
+)
+```
+
+The output includes generated captions, resolved paths, per-image details, and
+bootstrap intervals. The CLI can load a local HuggingFace checkpoint:
+
+```bash
+mitigv-evaluate-pipeline --input-json samples.json --image-root ~/dataset \
+  --model-type llava --model-id ~/checkpoints/llava-1.5-7b-hf \
+  --output-json results/chair.json
+```
+
 The supplementary double judge is available as `mitigv.evaluation.judge`. It calls
 DeepSeek (`deepseek-chat`, temperature 0, JSON response format) using the fixed
 prompt `mitigv/evaluation/prompts/extract_objects.txt`, caches by caption SHA-256, and
