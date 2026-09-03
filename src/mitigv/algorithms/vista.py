@@ -19,18 +19,18 @@ Self-Logits Augmentation — is logits-level and left as future work.)
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 
-from mitigv.backends.hf import HFMitigator, HFMitigatorConfig
+from mitigv.backends.generic import GenericMitigator, GenericMitigatorConfig
 from mitigv.core.base import MitigatorConfigError
 from mitigv.core.registry import register_mitigator
 
 __all__ = ["VISTAConfig", "VISTA"]
 
 
-class VISTAConfig(HFMitigatorConfig):
+class VISTAConfig(GenericMitigatorConfig):
     """Hyper-parameters for VISTA.
 
     Attributes:
@@ -47,7 +47,7 @@ class VISTAConfig(HFMitigatorConfig):
 
 
 @register_mitigator("vista")
-class VISTA(HFMitigator):
+class VISTA(GenericMitigator):
     """Visual Information Steering (VSV component).
 
     Computes the VSV once per generation from two forward passes (with / without
@@ -60,17 +60,25 @@ class VISTA(HFMitigator):
     config_class = VISTAConfig
 
     # -- input preparation -----------------------------------------------------
-    def _prepare_inputs(self, images: Any, prompt: str, cfg: VISTAConfig) -> dict[str, Any]:
+    def _prepare_inputs(
+        self, images: Any, prompt: str, cfg: VISTAConfig
+    ) -> dict[str, Any]:
         inputs = super()._prepare_inputs(images, prompt, cfg)
+        if cfg.steer_strength == 0:
+            self._uncond_inputs = {}
+            self._steer_vectors = []
+            return inputs
         uncond_prompt = self._remove_image_placeholder(prompt)
         self._uncond_inputs = super()._prepare_inputs(None, uncond_prompt, cfg)
         self._steer_vectors = self._compute_steering_vectors(inputs)
         return inputs
 
     @staticmethod
-    def _remove_image_placeholder(prompt: str) -> str:
+    def _remove_image_placeholder(prompt: str | Sequence[str]) -> str | list[str]:
         """Drop the ``<image>`` placeholder (plus trailing whitespace) from text."""
-        return re.sub(r"<image>\s*", "", prompt, count=1)
+        if isinstance(prompt, str):
+            return re.sub(r"<image>\s*", "", prompt, count=1)
+        return [re.sub(r"<image>\s*", "", item, count=1) for item in prompt]
 
     # -- steering vector --------------------------------------------------------
     def _forward_hidden(self, inputs: dict[str, Any]) -> Any:
@@ -87,20 +95,49 @@ class VISTA(HFMitigator):
     def _compute_steering_vectors(self, inputs: dict[str, Any]) -> list[torch.Tensor]:
         """Compute per-layer VSV ``V_p - V_n`` from the last token's residual."""
         was_training = bool(getattr(self.model, "training", False))
-        with torch.no_grad():
-            if hasattr(self.model, "eval"):
-                self.model.eval()
-            out_p = self._forward_hidden(inputs)
-            out_n = self._forward_hidden(self._uncond_inputs)
-            hs_p = out_p.hidden_states
-            hs_n = out_n.hidden_states
-            vectors = [
-                hs_p[l][:, -1, :] - hs_n[l][:, -1, :]
-                for l in range(1, len(hs_p))
-            ]
-        if was_training:
-            self.model.train()
+        try:
+            with torch.no_grad():
+                if hasattr(self.model, "eval"):
+                    self.model.eval()
+                out_p = self._forward_hidden(inputs)
+                out_n = self._forward_hidden(self._uncond_inputs)
+                hs_p = out_p.hidden_states
+                hs_n = out_n.hidden_states
+                if len(hs_p) != len(hs_n):
+                    raise RuntimeError(
+                        "conditional and text-only branches returned different "
+                        "hidden-state depths"
+                    )
+                vectors = [
+                    self._last_hidden(hs_p[layer], inputs.get("attention_mask"))
+                    - self._last_hidden(
+                        hs_n[layer], self._uncond_inputs.get("attention_mask")
+                    )
+                    for layer in range(1, len(hs_p))
+                ]
+        finally:
+            if was_training:
+                self.model.train()
         return vectors
+
+    @staticmethod
+    def _last_hidden(
+        hidden_states: torch.Tensor, attention_mask: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Select the right-most non-padding hidden state for every batch row."""
+        if (
+            attention_mask is None
+            or attention_mask.ndim != 2
+            or hidden_states.shape[1] != attention_mask.shape[1]
+        ):
+            return hidden_states[:, -1, :]
+        valid = attention_mask.to(dtype=torch.bool)
+        if not bool(valid.any(dim=1).all()):
+            raise ValueError("attention_mask contains an empty input sequence")
+        positions = torch.arange(valid.shape[1], device=valid.device).unsqueeze(0)
+        last_valid = positions.masked_fill(~valid, -1).max(dim=1).values
+        batch = torch.arange(hidden_states.shape[0], device=hidden_states.device)
+        return hidden_states[batch, last_valid]
 
     # -- residual-stream injection ----------------------------------------------
     def _on_generate_start(self, cfg: VISTAConfig) -> None:
@@ -118,11 +155,15 @@ class VISTA(HFMitigator):
 
             def make_hook(vec: torch.Tensor):
                 def hook(module: Any, args: Any, output: Any) -> Any:
-                    return output + strength * vec.unsqueeze(1)
+                    return self._add_to_layer_output(
+                        output, strength * vec.unsqueeze(1)
+                    )
 
                 return hook
 
-            self._steer_hooks.append(layers[index].register_forward_hook(make_hook(vector)))
+            self._steer_hooks.append(
+                layers[index].register_forward_hook(make_hook(vector))
+            )
 
     def _on_generate_end(self) -> None:
         for handle in getattr(self, "_steer_hooks", []):

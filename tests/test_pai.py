@@ -53,14 +53,21 @@ class PaiModel(torch.nn.Module):
         self.calls = []
         self.reorder_calls = []
 
-    def forward(self, input_ids=None, attention_mask=None, past_key_values=None,
-                use_cache=True, return_dict=True, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+        **kwargs,
+    ):
         self.calls.append("pixel_values" in kwargs)
         vec = self.cond_vec if "pixel_values" in kwargs else self.uncond_vec
-        b, l = input_ids.shape
-        logits = vec.view(1, 1, -1).expand(b, l, -1)
+        batch_size, seq_len = input_ids.shape
+        logits = vec.view(1, 1, -1).expand(batch_size, seq_len, -1)
         step = 0 if past_key_values is None else int(past_key_values[0, 0].item()) + 1
-        cache = torch.full((b, 1), step, dtype=torch.long)
+        cache = torch.full((batch_size, 1), step, dtype=torch.long)
         return SimpleNamespace(logits=logits, past_key_values=cache)
 
     def _reorder_cache(self, past_key_values, beam_idx):
@@ -69,6 +76,7 @@ class PaiModel(torch.nn.Module):
 
 
 # --- fake Llama stack for the attention patch lifecycle --------------------
+
 
 class FakeAttn:
     def __init__(self):
@@ -97,8 +105,8 @@ class FakeVlm(torch.nn.Module):
         self.dummy = torch.nn.Parameter(torch.zeros(1))
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
-        b, l = input_ids.shape
-        logits = torch.zeros(b, l, 2)
+        batch_size, seq_len = input_ids.shape
+        logits = torch.zeros(batch_size, seq_len, 2)
         return SimpleNamespace(logits=logits, past_key_values=None)
 
 
@@ -123,6 +131,8 @@ class TestPAIConfig:
             PAIConfig(start_layer=4, end_layer=2)
         with pytest.raises(MitigatorConfigError, match="num_image_tokens"):
             PAIConfig(num_image_tokens=0)
+        with pytest.raises(MitigatorConfigError, match="num_image_tokens"):
+            PAIConfig(num_image_tokens=1.5)
 
 
 class TestRemoveImagePlaceholder:
@@ -131,7 +141,10 @@ class TestRemoveImagePlaceholder:
         assert PAI._remove_image_placeholder(p) == "SYS USER: Question? ASSISTANT:"
 
     def test_no_image_is_unchanged(self):
-        assert PAI._remove_image_placeholder("USER: question ASSISTANT:") == "USER: question ASSISTANT:"
+        assert (
+            PAI._remove_image_placeholder("USER: question ASSISTANT:")
+            == "USER: question ASSISTANT:"
+        )
 
 
 class TestAmplifyAttention:
@@ -156,8 +169,11 @@ class TestPAI:
     def test_registered_and_buildable(self):
         assert "pai" in list_mitigators()
         m = build_mitigator(
-            "pai", PaiModel([1, 0, 0], [0, 1, 0], 3), PaiProcessor(VOCAB),
-            alpha=0.0, max_new_tokens=1,
+            "pai",
+            PaiModel([1, 0, 0], [0, 1, 0], 3),
+            PaiProcessor(VOCAB),
+            alpha=0.0,
+            max_new_tokens=1,
         )
         assert isinstance(m, PAI)
 
@@ -174,8 +190,25 @@ class TestPAI:
         model.config = SimpleNamespace(image_token_index=7)
         pai = PAI(model, PaiProcessor(VOCAB), alpha=0.0, gamma=1.0)
         inputs = {"input_ids": torch.tensor([[1, 7, 2, 3]])}
-        start, end = pai._locate_image_span(inputs, pai.config.copy(num_image_tokens=576))
+        start, end = pai._locate_image_span(
+            inputs, pai.config.copy(num_image_tokens=576)
+        )
         assert (start, end) == (1, 577)
+
+    def test_locates_different_spans_per_batch_row(self):
+        model = torch.nn.Module()
+        model.config = SimpleNamespace(image_token_index=7, image_seq_length=4)
+        pai = PAI(model, PaiProcessor(VOCAB), alpha=0.0, gamma=1.0)
+        inputs = {"input_ids": torch.tensor([[0, 7, 2], [7, 2, 2]])}
+        spans = pai._locate_image_spans(inputs, pai.config)
+        assert spans.tolist() == [[1, 5], [0, 4]]
+
+    def test_batched_attention_uses_each_rows_own_span(self):
+        weights = torch.ones(2, 1, 1, 4)
+        spans = torch.tensor([[0, 2], [2, 4]])
+        out = PAI._amplify_attention_spans(weights, spans, alpha=1.0)
+        assert out[0, 0, 0].tolist() == [2.0, 2.0, 1.0, 1.0]
+        assert out[1, 0, 0].tolist() == [1.0, 1.0, 2.0, 2.0]
 
     def test_adaptive_plausibility(self):
         image = torch.tensor([[1.0, 3.0, 2.0]])  # max 3.0
@@ -232,8 +265,9 @@ class TestPAI:
 
     def test_end_to_end_greedy_with_cfg(self):
         model = PaiModel([0.0, 5.0, 0.0], [0.0, 0.0, 5.0], 3)
-        pai = PAI(model, PaiProcessor(VOCAB), alpha=0.0, gamma=2.0, beta=0.0,
-                  max_new_tokens=1)
+        pai = PAI(
+            model, PaiProcessor(VOCAB), alpha=0.0, gamma=2.0, beta=0.0, max_new_tokens=1
+        )
         # guided logits = 2*[0,5,-5] + [0,0,5] = [0,10,-5] -> argmax "a"
         assert pai(torch.zeros(1, 1), "a") == "a"
         assert model.calls == [True, False]  # cond then uncond
@@ -257,6 +291,16 @@ class TestPAI:
         for i in range(4):
             assert layers[i].self_attn.forward is originals[i]
 
+    def test_per_call_alpha_is_used_by_attention_patch(self):
+        vlm = FakeVlm(n_layers=4)
+        pai = PAI(vlm, PaiProcessor(VOCAB), alpha=0.2, gamma=1.0)
+        cfg = pai.config.copy(alpha=0.7, start_layer=1, end_layer=2)
+        pai._on_generate_start(cfg)
+        try:
+            assert pai._attn_alpha == 0.7
+        finally:
+            pai._on_generate_end()
+
     def test_alpha_zero_does_not_patch(self):
         vlm = FakeVlm(n_layers=4)
         pai = PAI(vlm, PaiProcessor(VOCAB), alpha=0.0, gamma=1.0)
@@ -269,8 +313,16 @@ class TestPAI:
 
     def test_beam_search(self):
         model = PaiModel([5.0, 0.0, 0.0], [0.0, 5.0, 0.0], 3)
-        pai = PAI(model, PaiProcessor(VOCAB), alpha=0.0, gamma=2.0, beta=0.0,
-                  num_beams=2, num_return_sequences=2, max_new_tokens=2)
+        pai = PAI(
+            model,
+            PaiProcessor(VOCAB),
+            alpha=0.0,
+            gamma=2.0,
+            beta=0.0,
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=2,
+        )
         out = pai(torch.zeros(1, 1), "a")
         assert isinstance(out, list) and len(out) == 2
         assert len(model.reorder_calls) >= 1
@@ -287,7 +339,15 @@ class TestPAI:
                 self.aux_calls.append(beam_idx.clone())
                 super()._reorder_aux_cache(beam_idx)
 
-        pai = SpyPAI(model, PaiProcessor(VOCAB), alpha=0.0, gamma=2.0, beta=0.0,
-                     num_beams=2, num_return_sequences=2, max_new_tokens=2)
+        pai = SpyPAI(
+            model,
+            PaiProcessor(VOCAB),
+            alpha=0.0,
+            gamma=2.0,
+            beta=0.0,
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=2,
+        )
         pai(torch.zeros(1, 1), "a")
         assert len(pai.aux_calls) == 2

@@ -1,0 +1,23 @@
+Extract every concrete, visually verifiable object noun phrase mentioned in the caption.
+
+Return JSON only, with exactly this schema:
+{"objects": [{"name": "...", "attribute_free_head": "..."}]}
+
+Rules:
+1. Include all distinct concrete physical objects explicitly mentioned, including
+   repeated mentions when they refer to separate noun phrases.
+2. Preserve the most specific noun phrase in `name` (for example, "red fire
+   truck"), and remove colors, sizes, materials, poses, and other modifiers in
+   `attribute_free_head` (for example, "fire truck").
+3. Exclude abstract nouns, actions, emotions, people-less scene/layout words,
+   and background or setting nouns such as "image", "scene", "background",
+   "street", "room", "landscape", "sky", "day", "view", or "photo" unless
+   the caption explicitly describes a physical object represented by a COCO
+   category.
+4. Do not infer objects that are not stated. Do not include pronouns, generic
+   descriptions, or category names used only as part of an abstract expression.
+5. Use English noun phrases. If no concrete objects are mentioned, return
+   {"objects": []}.
+
+Caption:
+{{caption}}

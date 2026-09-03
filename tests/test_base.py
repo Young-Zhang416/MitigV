@@ -9,6 +9,7 @@ from mitigv import BaseMitigator, MitigatorConfig, MitigatorConfigError
 # Test doubles — concrete subclasses used to exercise the abstract contract.
 # ---------------------------------------------------------------------------
 
+
 class ToyConfig(MitigatorConfig):
     """Config with one algorithm-specific field, plus its own validation."""
 
@@ -20,11 +21,17 @@ class ToyConfig(MitigatorConfig):
             raise MitigatorConfigError("alpha must be > 0")
 
 
+class MutableConfig(MitigatorConfig):
+    options: dict = None
+
+
 class ToyMitigator(BaseMitigator):
     algorithm_name = "toy"
     config_class = ToyConfig
 
-    def __init__(self, model=None, processor=None, config=None, generated="mitigated", **kwargs):
+    def __init__(
+        self, model=None, processor=None, config=None, generated="mitigated", **kwargs
+    ):
         super().__init__(model=model, processor=processor, config=config, **kwargs)
         self._generated = generated
 
@@ -50,6 +57,7 @@ PROCESSOR = object()
 # ---------------------------------------------------------------------------
 # MitigatorConfig
 # ---------------------------------------------------------------------------
+
 
 class TestMitigatorConfig:
     def test_defaults(self):
@@ -93,6 +101,14 @@ class TestMitigatorConfig:
         with pytest.raises(MitigatorConfigError, match="alpha must be > 0"):
             ToyConfig().copy(alpha=-1.0)
 
+    def test_copy_and_to_dict_do_not_alias_mutable_values(self):
+        cfg = MutableConfig(options={"nested": [1]})
+        copied = cfg.copy()
+        serialized = cfg.to_dict()
+        copied.options["nested"].append(2)
+        serialized["options"]["nested"].append(3)
+        assert cfg.options == {"nested": [1]}
+
     @pytest.mark.parametrize(
         "kwargs, message",
         [
@@ -107,10 +123,28 @@ class TestMitigatorConfig:
         with pytest.raises(MitigatorConfigError, match=message):
             MitigatorConfig(**kwargs)
 
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+    def test_rejects_non_finite_numbers(self, value):
+        with pytest.raises(MitigatorConfigError, match="temperature must be finite"):
+            MitigatorConfig(temperature=value)
+
+    @pytest.mark.parametrize(
+        "factory, message",
+        [
+            (lambda: MitigatorConfig(max_new_tokens=1.5), "max_new_tokens"),
+            (lambda: MitigatorConfig(do_sample=1), "do_sample"),
+            (lambda: ToyConfig(alpha="2"), "alpha"),
+        ],
+    )
+    def test_rejects_wrong_scalar_types(self, factory, message):
+        with pytest.raises(MitigatorConfigError, match=message):
+            factory()
+
 
 # ---------------------------------------------------------------------------
 # BaseMitigator
 # ---------------------------------------------------------------------------
+
 
 class TestBaseMitigator:
     def test_is_abstract(self):

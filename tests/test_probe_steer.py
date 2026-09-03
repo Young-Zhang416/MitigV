@@ -17,6 +17,11 @@ class IdentityLayer(torch.nn.Module):
         return hidden_states
 
 
+class TupleLayer(torch.nn.Module):
+    def forward(self, hidden_states, *args, **kwargs):
+        return hidden_states, "cache"
+
+
 class FakeLm(torch.nn.Module):
     def __init__(self, n_layers):
         super().__init__()
@@ -32,11 +37,11 @@ class FakeVlm(torch.nn.Module):
         self.dummy = torch.nn.Parameter(torch.zeros(1))
 
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
-        b, l = input_ids.shape
-        h = torch.zeros(b, l, self.hidden_dim)
+        batch_size, seq_len = input_ids.shape
+        h = torch.zeros(batch_size, seq_len, self.hidden_dim)
         for layer in self.language_model.layers:
             h = layer(h)
-        logits = torch.zeros(b, l, self.vocab_size)
+        logits = torch.zeros(batch_size, seq_len, self.vocab_size)
         logits[..., 1] = 1.0
         return SimpleNamespace(logits=logits, past_key_values=0)
 
@@ -88,8 +93,13 @@ class TestLinearProbeSteer:
     def test_injects_normalized_vector_at_single_layer(self):
         model = FakeVlm(n_layers=4, hidden_dim=2, vocab_size=3)
         # steering vector [3, 4] -> unit [0.6, 0.8]
-        steer = LinearProbeSteer(model, ProbeProcessor(VOCAB), steering_vector=torch.tensor([3.0, 4.0]),
-                                 beta=10.0, layer=1)
+        steer = LinearProbeSteer(
+            model,
+            ProbeProcessor(VOCAB),
+            steering_vector=torch.tensor([3.0, 4.0]),
+            beta=10.0,
+            layer=1,
+        )
         layers = steer._language_model_layers()
         steer._on_generate_start(steer.config)
 
@@ -105,20 +115,73 @@ class TestLinearProbeSteer:
 
     def test_zero_beta_no_hooks(self):
         model = FakeVlm(n_layers=4, hidden_dim=2, vocab_size=3)
-        steer = LinearProbeSteer(model, ProbeProcessor(VOCAB), steering_vector=torch.tensor([3.0, 4.0]),
-                                 beta=0.0, layer=1)
+        steer = LinearProbeSteer(
+            model,
+            ProbeProcessor(VOCAB),
+            steering_vector=torch.tensor([3.0, 4.0]),
+            beta=0.0,
+            layer=1,
+        )
         steer._on_generate_start(steer.config)
         assert steer._steer_hooks == []
 
+    def test_tuple_layer_output_is_preserved(self):
+        model = FakeVlm(n_layers=1, hidden_dim=2, vocab_size=3)
+        model.language_model.layers[0] = TupleLayer()
+        steer = LinearProbeSteer(
+            model,
+            ProbeProcessor(VOCAB),
+            steering_vector=torch.tensor([3.0, 4.0]),
+            beta=10.0,
+            layer=0,
+        )
+        steer._on_generate_start(steer.config)
+        try:
+            hidden, cache = model.language_model.layers[0](torch.zeros(1, 1, 2))
+            assert torch.allclose(hidden, torch.tensor([[[6.0, 8.0]]]))
+            assert cache == "cache"
+        finally:
+            steer._on_generate_end()
+
+    @pytest.mark.parametrize(
+        "vector, message",
+        [
+            (torch.zeros(2), "non-zero"),
+            (torch.tensor([1.0, float("nan")]), "finite"),
+            (torch.ones(1, 2), "shape"),
+        ],
+    )
+    def test_invalid_steering_vector_raises(self, vector, message):
+        steer = LinearProbeSteer(
+            FakeVlm(n_layers=1),
+            ProbeProcessor(VOCAB),
+            steering_vector=vector,
+            beta=1.0,
+            layer=0,
+        )
+        with pytest.raises(MitigatorConfigError, match=message):
+            steer._on_generate_start(steer.config)
+
     def test_layer_out_of_range_raises(self):
         model = FakeVlm(n_layers=4, hidden_dim=2, vocab_size=3)
-        steer = LinearProbeSteer(model, ProbeProcessor(VOCAB), steering_vector=torch.tensor([1.0, 0.0]),
-                                 beta=1.0, layer=10)
+        steer = LinearProbeSteer(
+            model,
+            ProbeProcessor(VOCAB),
+            steering_vector=torch.tensor([1.0, 0.0]),
+            beta=1.0,
+            layer=10,
+        )
         with pytest.raises(MitigatorConfigError, match="out of range"):
             steer._on_generate_start(steer.config)
 
     def test_end_to_end_runs(self):
         model = FakeVlm(n_layers=4, hidden_dim=2, vocab_size=3)
-        steer = LinearProbeSteer(model, ProbeProcessor(VOCAB), steering_vector=torch.tensor([1.0, 0.0]),
-                                 beta=2.0, layer=1, max_new_tokens=2)
+        steer = LinearProbeSteer(
+            model,
+            ProbeProcessor(VOCAB),
+            steering_vector=torch.tensor([1.0, 0.0]),
+            beta=2.0,
+            layer=1,
+            max_new_tokens=2,
+        )
         assert steer(None, "a") == "aa"

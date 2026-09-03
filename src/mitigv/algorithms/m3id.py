@@ -6,7 +6,7 @@ relies on its language prior and hallucinates. M3ID amplifies the visual
 (conditional) branch relative to a no-image (unconditional) branch, with the
 amplification weight *growing* with the decoding step::
 
-    gamma_t     = exp(-lambda * t)            # forgetting factor, t = step index
+    gamma_t     = exp(-lambda * t)            # first predicted token uses t = 1
     weight_t    = (1 - gamma_t) / gamma_t     # = exp(lambda * t) - 1
     logits      = l_c + 1[max(l_c) < log(alpha)] * weight_t * (l_c - l_u)
 
@@ -14,7 +14,7 @@ where ``l_c``/``l_u`` are the with-image / no-image logits. The indicator gate
 applies the contrast only when the model is *uncertain* (top-1 conditional
 probability below ``alpha``), which prevents overcompensation.
 
-``alpha=0`` never gates (contrast always applied when weight > 0), and
+Larger ``alpha`` values activate the uncertainty gate more often;
 ``forgetting_rate=0`` gives a constant weight of 0 (plain decoding).
 """
 
@@ -22,18 +22,18 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 
-from mitigv.backends.hf import HFMitigator, HFMitigatorConfig
+from mitigv.backends.generic import GenericMitigator, GenericMitigatorConfig
 from mitigv.core.base import MitigatorConfigError
 from mitigv.core.registry import register_mitigator
 
 __all__ = ["M3IDConfig", "M3ID"]
 
 
-class M3IDConfig(HFMitigatorConfig):
+class M3IDConfig(GenericMitigatorConfig):
     """Hyper-parameters for M3ID.
 
     Attributes:
@@ -57,20 +57,28 @@ class M3IDConfig(HFMitigatorConfig):
 
 
 @register_mitigator("m3id")
-class M3ID(HFMitigator):
+class M3ID(GenericMitigator):
     """Multi-Modal Mutual Information Decoding.
 
     At every decoding step it runs the model with the image and without it, and
     adds ``weight_t * (l_c - l_u)`` to the conditional logits when the model is
-    uncertain. ``weight_t`` grows from ``0`` (step 0) toward ``exp(lambda*t)-1``.
+    uncertain. Following the paper's one-based indexing, the first token already
+    receives weight ``exp(lambda)-1`` and the weight grows thereafter.
     """
 
     algorithm_name = "m3id"
     config_class = M3IDConfig
 
     # -- input preparation -----------------------------------------------------
-    def _prepare_inputs(self, images: Any, prompt: str, cfg: M3IDConfig) -> dict[str, Any]:
+    def _prepare_inputs(
+        self, images: Any, prompt: str, cfg: M3IDConfig
+    ) -> dict[str, Any]:
         inputs = super()._prepare_inputs(images, prompt, cfg)
+        if cfg.forgetting_rate == 0:
+            self._uncond_inputs = {}
+            self._uncond_attention_mask = None
+            self._uncond_past = None
+            return inputs
         uncond_prompt = self._remove_image_placeholder(prompt)
         self._uncond_inputs = super()._prepare_inputs(None, uncond_prompt, cfg)
         self._uncond_attention_mask = self._uncond_inputs.get("attention_mask")
@@ -78,15 +86,32 @@ class M3ID(HFMitigator):
         return inputs
 
     @staticmethod
-    def _remove_image_placeholder(prompt: str) -> str:
+    def _remove_image_placeholder(prompt: str | Sequence[str]) -> str | list[str]:
         """Drop the ``<image>`` placeholder (plus trailing whitespace) from text."""
-        return re.sub(r"<image>\s*", "", prompt, count=1)
+        if isinstance(prompt, str):
+            return re.sub(r"<image>\s*", "", prompt, count=1)
+        return [re.sub(r"<image>\s*", "", item, count=1) for item in prompt]
 
     @staticmethod
     def _step_weight(step: int, forgetting_rate: float) -> float:
-        """Contrast weight for generation step ``t``: ``(1 - gamma_t) / gamma_t``."""
-        gamma_t = math.exp(-forgetting_rate * step)
-        return (1.0 - gamma_t) / gamma_t
+        """Return ``exp(lambda * t) - 1`` with the paper's one-based ``t``.
+
+        The backend passes a zero-based ``step``, whereas Algorithm 1 initializes
+        ``t = 1`` for the first predicted token. ``expm1`` is more accurate for
+        the small forgetting rates normally used by M3ID.
+        """
+        exponent = forgetting_rate * (step + 1)
+        try:
+            weight = math.expm1(exponent)
+        except OverflowError as exc:
+            raise MitigatorConfigError(
+                "forgetting_rate is too large for the requested generation step"
+            ) from exc
+        if not math.isfinite(weight):
+            raise MitigatorConfigError(
+                "forgetting_rate is too large for the requested generation step"
+            )
+        return weight
 
     # -- intervention -----------------------------------------------------------
     def _step_logits(
@@ -98,7 +123,9 @@ class M3ID(HFMitigator):
         step: int,
         cfg: M3IDConfig,
     ) -> tuple[torch.Tensor, Any]:
-        logits_c, past = self._forward(input_ids, attention_mask, inputs, past_key_values)
+        logits_c, past = self._forward(
+            input_ids, attention_mask, inputs, past_key_values
+        )
 
         weight = self._step_weight(step, cfg.forgetting_rate)
         if weight == 0.0:
@@ -110,13 +137,18 @@ class M3ID(HFMitigator):
         else:
             uncond_ids = input_ids
         logits_u, self._uncond_past = self._forward(
-            uncond_ids, self._uncond_attention_mask, self._uncond_inputs, self._uncond_past
+            uncond_ids,
+            self._uncond_attention_mask,
+            self._uncond_inputs,
+            self._uncond_past,
         )
         self._grow_uncond_mask()
 
         # Gate: apply contrast only where the conditional top-1 probability < alpha.
         l_c = torch.log_softmax(logits_c, dim=-1)
-        gate = (l_c.max(dim=-1, keepdim=True).values < math.log(cfg.alpha)).to(logits_c.dtype)
+        gate = (l_c.max(dim=-1, keepdim=True).values < math.log(cfg.alpha)).to(
+            logits_c.dtype
+        )
 
         logits = logits_c + gate * weight * (logits_c - logits_u)
         return logits, past
@@ -129,12 +161,18 @@ class M3ID(HFMitigator):
             dtype=self._uncond_attention_mask.dtype,
             device=self._uncond_attention_mask.device,
         )
-        self._uncond_attention_mask = torch.cat([self._uncond_attention_mask, ones], dim=-1)
+        self._uncond_attention_mask = torch.cat(
+            [self._uncond_attention_mask, ones], dim=-1
+        )
 
     # -- beam search ---------------------------------------------------------
-    def _expand_inputs_for_beams(self, inputs: dict[str, Any], num_beams: int) -> dict[str, Any]:
+    def _expand_inputs_for_beams(
+        self, inputs: dict[str, Any], num_beams: int
+    ) -> dict[str, Any]:
         expanded = super()._expand_inputs_for_beams(inputs, num_beams)
-        self._uncond_inputs = super()._expand_inputs_for_beams(self._uncond_inputs, num_beams)
+        self._uncond_inputs = super()._expand_inputs_for_beams(
+            self._uncond_inputs, num_beams
+        )
         if self._uncond_attention_mask is not None:
             self._uncond_attention_mask = self._uncond_attention_mask.repeat_interleave(
                 num_beams, dim=0
@@ -144,4 +182,6 @@ class M3ID(HFMitigator):
     def _reorder_aux_cache(self, beam_idx: torch.Tensor) -> None:
         self._uncond_past = self._reorder_cache(self._uncond_past, beam_idx)
         if self._uncond_attention_mask is not None:
-            self._uncond_attention_mask = self._uncond_attention_mask.index_select(0, beam_idx)
+            self._uncond_attention_mask = self._uncond_attention_mask.index_select(
+                0, beam_idx
+            )

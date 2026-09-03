@@ -18,8 +18,14 @@ algorithms polymorphically.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields, replace
+import copy as _copy
+from dataclasses import dataclass, fields
+import math
+from numbers import Integral, Real
+import threading
 from typing import Any, ClassVar, Mapping
+
+from mitigv.core.interfaces import ModelProtocol, ProcessorProtocol
 
 __all__ = ["MitigatorConfig", "MitigatorConfigError", "BaseMitigator"]
 
@@ -75,6 +81,48 @@ class MitigatorConfig:
         Subclasses should call ``super().validate()`` first, then check their
         own fields.
         """
+        for item in fields(self):
+            value = getattr(self, item.name)
+            default = item.default
+            # Dataclasses do not enforce annotations. Validate scalar fields
+            # from their declared defaults so invalid JSON/CLI values fail as
+            # configuration errors instead of surfacing later as TypeError.
+            if isinstance(default, bool) and not isinstance(value, bool):
+                raise MitigatorConfigError(f"{item.name} must be a boolean")
+            if (
+                isinstance(default, Integral)
+                and not isinstance(default, bool)
+                and (not isinstance(value, Integral) or isinstance(value, bool))
+            ):
+                raise MitigatorConfigError(f"{item.name} must be an integer")
+            if (
+                isinstance(default, Real)
+                and not isinstance(default, Integral)
+                and (not isinstance(value, Real) or isinstance(value, bool))
+            ):
+                raise MitigatorConfigError(f"{item.name} must be a real number")
+            if isinstance(default, str) and not isinstance(value, str):
+                raise MitigatorConfigError(f"{item.name} must be a string")
+            if isinstance(value, Real) and not math.isfinite(float(value)):
+                raise MitigatorConfigError(f"{item.name} must be finite")
+        if not isinstance(self.max_new_tokens, Integral) or isinstance(
+            self.max_new_tokens, bool
+        ):
+            raise MitigatorConfigError("max_new_tokens must be an integer")
+        if not isinstance(self.num_beams, Integral) or isinstance(self.num_beams, bool):
+            raise MitigatorConfigError("num_beams must be an integer")
+        if not isinstance(self.temperature, Real) or isinstance(self.temperature, bool):
+            raise MitigatorConfigError("temperature must be a real number")
+        if not isinstance(self.do_sample, bool):
+            raise MitigatorConfigError("do_sample must be a boolean")
+        if self.top_p is not None and (
+            not isinstance(self.top_p, Real) or isinstance(self.top_p, bool)
+        ):
+            raise MitigatorConfigError("top_p must be a real number or None")
+        if self.seed is not None and (
+            not isinstance(self.seed, Integral) or isinstance(self.seed, bool)
+        ):
+            raise MitigatorConfigError("seed must be an integer or None")
         if self.max_new_tokens < 0:
             raise MitigatorConfigError("max_new_tokens must be >= 0")
         if self.num_beams < 1:
@@ -87,15 +135,13 @@ class MitigatorConfig:
     # -- (de)serialization & copying ------------------------------------
     def to_dict(self) -> dict[str, Any]:
         """Return this config's fields as a plain ``dict``."""
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        return {f.name: _copy.deepcopy(getattr(self, f.name)) for f in fields(self)}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "MitigatorConfig":
         """Build a config from a mapping, rejecting unknown keys (catches typos)."""
         if not isinstance(data, Mapping):
-            raise TypeError(
-                f"config must be a mapping, got {type(data).__name__!r}"
-            )
+            raise TypeError(f"config must be a mapping, got {type(data).__name__!r}")
         valid = {f.name for f in fields(cls)}
         unknown = set(data) - valid
         if unknown:
@@ -118,7 +164,11 @@ class MitigatorConfig:
                 f"unknown configuration key(s) for {type(self).__name__}: "
                 f"{sorted(unknown)}; valid keys are {sorted(valid)}"
             )
-        return replace(self, **overrides)
+        # ``replace`` alone aliases mutable values such as VCD's
+        # ``distortion_kwargs`` between the old and new configs.
+        values = self.to_dict()
+        values.update(_copy.deepcopy(overrides))
+        return type(self).from_dict(values)
 
 
 class BaseMitigator(ABC):
@@ -145,14 +195,18 @@ class BaseMitigator(ABC):
 
     def __init__(
         self,
-        model: Any = None,
-        processor: Any = None,
+        model: ModelProtocol | Any = None,
+        processor: ProcessorProtocol | Any = None,
         config: MitigatorConfig | Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         self.model = model
         self.processor = processor
         self.config = self._resolve_config(config, **kwargs)
+        # Concrete HF algorithms keep transient caches and hook handles on the
+        # instance. Serialize calls so one instance cannot corrupt another
+        # in-flight generation from a different application thread.
+        self._generation_lock = threading.RLock()
 
     # -- configuration resolution ---------------------------------------
     def _resolve_config(

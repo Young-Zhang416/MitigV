@@ -17,23 +17,32 @@ class LengthModel(torch.nn.Module):
 
     def __init__(self, logits_by_len, vocab_size):
         super().__init__()
-        self.logits_by_len = {int(k): torch.as_tensor(v, dtype=torch.float32)
-                              for k, v in logits_by_len.items()}
+        self.logits_by_len = {
+            int(k): torch.as_tensor(v, dtype=torch.float32)
+            for k, v in logits_by_len.items()
+        }
         self.vocab_size = vocab_size
         self.dummy = torch.nn.Parameter(torch.zeros(1))
         self.reorder_calls = []
 
-    def forward(self, input_ids=None, attention_mask=None, past_key_values=None,
-                use_cache=True, return_dict=True, **kwargs):
-        b, l = input_ids.shape
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+        **kwargs,
+    ):
+        batch_size, seq_len = input_ids.shape
         if past_key_values is None:
-            key = l
-            cache = torch.full((b, 1), key, dtype=torch.long)
+            key = seq_len
+            cache = torch.full((batch_size, 1), key, dtype=torch.long)
         else:
             key = int(past_key_values[0, 0].item())
             cache = past_key_values
         vec = self.logits_by_len[key]
-        logits = vec.view(1, 1, -1).expand(b, l, -1)
+        logits = vec.view(1, 1, -1).expand(batch_size, seq_len, -1)
         return SimpleNamespace(logits=logits, past_key_values=cache)
 
     def _reorder_cache(self, past_key_values, beam_idx):
@@ -97,8 +106,12 @@ class TestDisturbPrompt:
 class TestICD:
     def test_registered_and_buildable(self):
         assert "icd" in list_mitigators()
-        m = build_mitigator("icd", LengthModel({1: [0.0, 1.0, 0.0, 0.0]}, 4),
-                            DummyProcessor(VOCAB), max_new_tokens=1)
+        m = build_mitigator(
+            "icd",
+            LengthModel({1: [0.0, 1.0, 0.0, 0.0]}, 4),
+            DummyProcessor(VOCAB),
+            max_new_tokens=1,
+        )
         assert isinstance(m, ICD)
 
     def test_adaptive_plausibility(self):
@@ -111,52 +124,109 @@ class TestICD:
         assert out[0, 2] == float("-inf")
 
     def test_step_logits_contrast_formula(self):
-        model = LengthModel({1: torch.tensor([0.0, 5.0, 0.0, 0.0]),
-                             2: torch.tensor([0.0, 0.0, 5.0, 0.0])}, 4)
-        processor = DummyProcessor(VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)})
+        model = LengthModel(
+            {
+                1: torch.tensor([0.0, 5.0, 0.0, 0.0]),
+                2: torch.tensor([0.0, 0.0, 5.0, 0.0]),
+            },
+            4,
+        )
+        processor = DummyProcessor(
+            VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)}
+        )
         icd = ICD(model, processor, lam=1.0, alpha=0.0, disturbance_prefix="P")
 
-        std_ids = torch.tensor([[1]])            # len 1 -> [0,5,0,0]
-        icd._disturbed_inputs = {"input_ids": torch.tensor([[3, 1]]),  # len 2 -> [0,0,5,0]
-                                 "attention_mask": torch.ones((1, 2), dtype=torch.long),
-                                 "pixel_values": torch.zeros(1, 1)}
+        std_ids = torch.tensor([[1]])  # len 1 -> [0,5,0,0]
+        icd._disturbed_inputs = {
+            "input_ids": torch.tensor([[3, 1]]),  # len 2 -> [0,0,5,0]
+            "attention_mask": torch.ones((1, 2), dtype=torch.long),
+            "pixel_values": torch.zeros(1, 1),
+        }
         icd._disturbed_attention_mask = torch.ones((1, 2), dtype=torch.long)
         icd._disturbed_past = None
 
-        inputs = {"input_ids": std_ids,
-                  "attention_mask": torch.ones((1, 1), dtype=torch.long),
-                  "pixel_values": torch.zeros(1, 1)}
-        logits, _ = icd._step_logits(std_ids, inputs["attention_mask"], inputs, None, 0, icd.config)
+        inputs = {
+            "input_ids": std_ids,
+            "attention_mask": torch.ones((1, 1), dtype=torch.long),
+            "pixel_values": torch.zeros(1, 1),
+        }
+        logits, _ = icd._step_logits(
+            std_ids, inputs["attention_mask"], inputs, None, 0, icd.config
+        )
         # [0,5,0,0] - 1*[0,0,5,0] = [0,5,-5,0]
         assert torch.allclose(logits, torch.tensor([[0.0, 5.0, -5.0, 0.0]]))
 
     def test_end_to_end_greedy(self):
-        model = LengthModel({1: torch.tensor([0.0, 5.0, 0.0, 0.0]),   # std -> "a"
-                             2: torch.tensor([0.0, 0.0, 5.0, 0.0])}, 4)  # dst -> "b"
+        model = LengthModel(
+            {
+                1: torch.tensor([0.0, 5.0, 0.0, 0.0]),  # std -> "a"
+                2: torch.tensor([0.0, 0.0, 5.0, 0.0]),
+            },
+            4,
+        )  # dst -> "b"
         processor = DummyProcessor(VOCAB)
-        icd = ICD(model, processor, lam=1.0, alpha=0.0, disturbance_prefix="P", max_new_tokens=1)
+        icd = ICD(
+            model,
+            processor,
+            lam=1.0,
+            alpha=0.0,
+            disturbance_prefix="P",
+            max_new_tokens=1,
+        )
         # contrast [0,5,0,0] - [0,0,5,0] -> argmax "a"
         assert icd(None, "a") == "a"
 
     def test_end_to_end_lam_zero_is_plain(self):
-        model = LengthModel({1: torch.tensor([0.0, 5.0, 0.0, 0.0]),
-                             2: torch.tensor([0.0, 0.0, 5.0, 0.0])}, 4)
+        model = LengthModel(
+            {
+                1: torch.tensor([0.0, 5.0, 0.0, 0.0]),
+                2: torch.tensor([0.0, 0.0, 5.0, 0.0]),
+            },
+            4,
+        )
         processor = DummyProcessor(VOCAB)
-        icd = ICD(model, processor, lam=0.0, alpha=0.0, disturbance_prefix="P", max_new_tokens=1)
+        icd = ICD(
+            model,
+            processor,
+            lam=0.0,
+            alpha=0.0,
+            disturbance_prefix="P",
+            max_new_tokens=1,
+        )
         assert icd(None, "a") == "a"  # lam=0 -> standard branch only
 
     def test_beam_search(self):
-        model = LengthModel({1: torch.tensor([0.0, 5.0, 0.0, 0.0]),
-                             2: torch.tensor([0.0, 0.0, 5.0, 0.0])}, 4)
-        processor = DummyProcessor(VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)})
-        icd = ICD(model, processor, lam=1.0, alpha=0.0, disturbance_prefix="P",
-                  num_beams=2, num_return_sequences=2, max_new_tokens=2)
+        model = LengthModel(
+            {
+                1: torch.tensor([0.0, 5.0, 0.0, 0.0]),
+                2: torch.tensor([0.0, 0.0, 5.0, 0.0]),
+            },
+            4,
+        )
+        processor = DummyProcessor(
+            VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)}
+        )
+        icd = ICD(
+            model,
+            processor,
+            lam=1.0,
+            alpha=0.0,
+            disturbance_prefix="P",
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=2,
+        )
         out = icd(None, "a")
         assert isinstance(out, list) and len(out) == 2
 
     def test_beam_aux_reorder(self):
-        model = LengthModel({1: torch.tensor([0.0, 5.0, 0.0, 0.0]),
-                             2: torch.tensor([0.0, 0.0, 5.0, 0.0])}, 4)
+        model = LengthModel(
+            {
+                1: torch.tensor([0.0, 5.0, 0.0, 0.0]),
+                2: torch.tensor([0.0, 0.0, 5.0, 0.0]),
+            },
+            4,
+        )
 
         class SpyICD(ICD):
             def __init__(self, *a, **kw):
@@ -167,8 +237,18 @@ class TestICD:
                 self.aux_calls.append(beam_idx.clone())
                 super()._reorder_aux_cache(beam_idx)
 
-        processor = DummyProcessor(VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)})
-        icd = SpyICD(model, processor, lam=1.0, alpha=0.0, disturbance_prefix="P",
-                     num_beams=2, num_return_sequences=2, max_new_tokens=2)
+        processor = DummyProcessor(
+            VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)}
+        )
+        icd = SpyICD(
+            model,
+            processor,
+            lam=1.0,
+            alpha=0.0,
+            disturbance_prefix="P",
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=2,
+        )
         icd(None, "a")
         assert len(icd.aux_calls) == 2  # reordered after both steps

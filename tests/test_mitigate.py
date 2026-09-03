@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from mitigv import mitigate
+from mitigv import load_mitigator, mitigate
 from mitigv.algorithms.vcd import VCD, VCDConfig
 
 
@@ -19,12 +19,21 @@ class ScriptedModel(torch.nn.Module):
         self.vocab_size = vocab_size
         self.dummy = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, input_ids=None, attention_mask=None, past_key_values=None,
-                use_cache=True, return_dict=True, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+        **kwargs,
+    ):
         step = 0 if past_key_values is None else past_key_values + 1
         token = self.script[min(step, len(self.script) - 1)]
-        b, l = input_ids.shape
-        logits = torch.full((b, l, self.vocab_size), -1e9, dtype=torch.float32)
+        batch_size, seq_len = input_ids.shape
+        logits = torch.full(
+            (batch_size, seq_len, self.vocab_size), -1e9, dtype=torch.float32
+        )
         logits[..., token] = 0.0
         return SimpleNamespace(logits=logits, past_key_values=step)
 
@@ -46,31 +55,96 @@ class DummyProcessor:
         }
 
     def batch_decode(self, sequences, skip_special_tokens=True):
-        return ["".join(self.id_to_token.get(int(i), "<?") for i in seq) for seq in sequences]
+        return [
+            "".join(self.id_to_token.get(int(i), "<?") for i in seq)
+            for seq in sequences
+        ]
 
 
 class TestMitigate:
+    def test_load_mitigator_is_one_step_api_for_loaded_objects(self):
+        decoder = load_mitigator(
+            "vcd",
+            model=ScriptedModel([1], 3),
+            processor=DummyProcessor(VOCAB),
+            alpha=0.0,
+            beta=0.0,
+            max_new_tokens=1,
+        )
+        assert isinstance(decoder, VCD)
+        assert decoder(None, "a") == "a"
+
+    def test_load_mitigator_requires_a_complete_model_source(self):
+        with pytest.raises(ValueError, match="provided together"):
+            load_mitigator("vcd", model=ScriptedModel([1], 3))
+        with pytest.raises(ValueError, match="model_type and model_id"):
+            load_mitigator("vcd", model_type="llava")
+
+    def test_load_mitigator_loads_checkpoint_and_algorithm_in_one_call(
+        self, monkeypatch
+    ):
+        import mitigv.backends.factory as factory
+
+        calls = []
+
+        def fake_load(model_type, model_id, **kwargs):
+            calls.append((model_type, model_id, kwargs))
+            return ScriptedModel([1], 3), DummyProcessor(VOCAB)
+
+        monkeypatch.setattr(factory, "load_vision_language", fake_load)
+        decoder = load_mitigator(
+            "vcd",
+            model_type="llava",
+            model_id="local/checkpoint",
+            model_kwargs={"torch_dtype": "auto"},
+            alpha=0.0,
+            beta=0.0,
+            max_new_tokens=1,
+        )
+        assert decoder(None, "a") == "a"
+        assert calls == [
+            (
+                "llava",
+                "local/checkpoint",
+                {"model_kwargs": {"torch_dtype": "auto"}, "processor_kwargs": None},
+            )
+        ]
+
     def test_builds_and_yields_callable(self):
-        with mitigate("vcd", VCDConfig(alpha=1.0, beta=0.0, max_new_tokens=1),
-                  model=ScriptedModel([1], 3), processor=DummyProcessor(VOCAB),
-                 ) as f:
+        with mitigate(
+            "vcd",
+            VCDConfig(alpha=0.0, beta=0.0, max_new_tokens=1),
+            model=ScriptedModel([1], 3),
+            processor=DummyProcessor(VOCAB),
+        ) as f:
             assert isinstance(f, VCD)
             assert f(None, "a") == "a"
 
     def test_kwargs_as_config_overrides(self):
-        with mitigate("vcd", model=ScriptedModel([1], 3), processor=DummyProcessor(VOCAB),
-                  alpha=3.0, beta=0.0, max_new_tokens=1,
-                 ) as f:
+        with mitigate(
+            "vcd",
+            model=ScriptedModel([1], 3),
+            processor=DummyProcessor(VOCAB),
+            alpha=3.0,
+            beta=0.0,
+            max_new_tokens=1,
+        ) as f:
             assert f.config.alpha == 3.0
 
     def test_accepts_class_instead_of_name(self):
-        with mitigate(VCD, VCDConfig(max_new_tokens=1), model=ScriptedModel([1], 3),
-                  processor=DummyProcessor(VOCAB)) as f:
+        with mitigate(
+            VCD,
+            VCDConfig(max_new_tokens=1),
+            model=ScriptedModel([1], 3),
+            processor=DummyProcessor(VOCAB),
+        ) as f:
             assert isinstance(f, VCD)
 
     def test_rejects_non_mitigator_class(self):
         with pytest.raises(TypeError, match="BaseMitigator"):
-            with mitigate(int, model=ScriptedModel([1], 3), processor=DummyProcessor(VOCAB)):
+            with mitigate(
+                int, model=ScriptedModel([1], 3), processor=DummyProcessor(VOCAB)
+            ):
                 pass
 
     def test_cleanup_frees_cuda_cache(self, monkeypatch):
@@ -78,8 +152,12 @@ class TestMitigate:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(1))
 
-        with mitigate("vcd", model=ScriptedModel([1], 3), processor=DummyProcessor(VOCAB),
-                  max_new_tokens=1):
+        with mitigate(
+            "vcd",
+            model=ScriptedModel([1], 3),
+            processor=DummyProcessor(VOCAB),
+            max_new_tokens=1,
+        ):
             pass
         assert calls == [1]
 
@@ -88,8 +166,12 @@ class TestMitigate:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(1))
 
-        with mitigate("vcd", model=ScriptedModel([1], 3), processor=DummyProcessor(VOCAB),
-                  cleanup=False):
+        with mitigate(
+            "vcd",
+            model=ScriptedModel([1], 3),
+            processor=DummyProcessor(VOCAB),
+            cleanup=False,
+        ):
             pass
         assert calls == []
 
@@ -104,6 +186,8 @@ class TestMitigate:
         code = "import mitigv, sys; print('torch' in sys.modules)"
         out = subprocess.run(
             [sys.executable, "-c", code],
-            capture_output=True, text=True, env={**os.environ, "PYTHONPATH": src},
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": src},
         )
         assert out.stdout.strip() == "False"

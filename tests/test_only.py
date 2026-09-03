@@ -29,7 +29,9 @@ class DummyProcessor:
         }
 
     def batch_decode(self, sequences, skip_special_tokens=True):
-        return ["".join(self.id_to_token.get(int(i), "<?") for i in s) for s in sequences]
+        return [
+            "".join(self.id_to_token.get(int(i), "<?") for i in s) for s in sequences
+        ]
 
 
 class TestConfig:
@@ -60,17 +62,21 @@ class TestImageTokenSpan:
 
 class TestSelectedMask:
     def test_low_tver_head_deactivated(self):
-        # 2 heads, 1 query, 4 keys; image tokens at positions [1, 3).
-        attn = torch.tensor([[
-            [[0.5, 0.0, 0.0, 0.5]],  # head 0: text-heavy -> high TVER
-            [[0.0, 0.5, 0.5, 0.0]],  # head 1: visual-heavy -> low TVER
-        ]])
+        # 2 heads, 1 query, 5 keys; image tokens at positions [1, 3).
+        attn = torch.tensor(
+            [
+                [
+                    [[0.05, 0.80, 0.05, 0.05, 0.05]],  # high text/image entropy ratio
+                    [[0.70, 0.10, 0.10, 0.05, 0.05]],  # lower ratio
+                ]
+            ]
+        )
         model = torch.nn.Module()
         model.config = SimpleNamespace(image_token_index=7)
         only = ONLY(model, DummyProcessor(VOCAB))
         only._img_start, only._img_end = 1, 3
         mask = only._compute_selected_mask(attn, only.config)
-        assert mask.tolist() == [False, True]  # head 1 deactivated
+        assert mask.tolist() == [[False, True]]  # head 1 deactivated
 
 
 class TestFuse:
@@ -90,5 +96,7 @@ class TestFuse:
 class TestONLY:
     def test_registered_and_buildable(self):
         assert "only" in list_mitigators()
-        m = build_mitigator("only", torch.nn.Module(), DummyProcessor(VOCAB), max_new_tokens=1)
+        m = build_mitigator(
+            "only", torch.nn.Module(), DummyProcessor(VOCAB), max_new_tokens=1
+        )
         assert isinstance(m, ONLY)

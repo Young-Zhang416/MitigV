@@ -46,6 +46,12 @@ class TestGaussianNoise:
         with pytest.raises(ValueError, match="std"):
             GaussianNoisePerturbation(std=-1.0)
 
+    def test_non_finite_std_and_invalid_clip_raise(self):
+        with pytest.raises(ValueError, match="std"):
+            GaussianNoisePerturbation(std=float("nan"))
+        with pytest.raises(ValueError, match="lower bound"):
+            GaussianNoisePerturbation(std=0.1, clip=(1.0, 0.0))
+
 
 class TestDiffusionNoise:
     def test_noise_increases_with_step(self):
@@ -65,14 +71,21 @@ class TestDiffusionNoise:
         with pytest.raises(ValueError, match="noise_step"):
             DiffusionNoisePerturbation(noise_step=1000, num_steps=1000)
 
+        with pytest.raises(ValueError, match="num_steps"):
+            DiffusionNoisePerturbation(noise_step=0, num_steps=0)
+
 
 class TestRegistry:
     def test_builtins_registered(self):
         assert {"gaussian_noise", "diffusion_noise"} <= set(list_perturbations())
 
     def test_build_by_name(self):
-        assert isinstance(build_perturbation("gaussian_noise", std=0.3), GaussianNoisePerturbation)
-        assert isinstance(build_perturbation("diffusion_noise"), DiffusionNoisePerturbation)
+        assert isinstance(
+            build_perturbation("gaussian_noise", std=0.3), GaussianNoisePerturbation
+        )
+        assert isinstance(
+            build_perturbation("diffusion_noise"), DiffusionNoisePerturbation
+        )
 
     def test_build_unknown_raises(self):
         with pytest.raises(KeyError, match="unknown perturbation"):

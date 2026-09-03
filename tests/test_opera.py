@@ -89,23 +89,79 @@ class TestDetectRetrospection:
         # summary token at abs position 12 repeats 15 times
         opera._penalty_columns = [[12] * 15 + [13, 14]]
         opera._chosen_tokens = [[99] * 20]
-        rb = opera._detect_retrospection(OPERAConfig(threshold=15, retrospection_window=20))
-        assert rb == (0, 3, 99)  # beam 0, target_len = 12-10+1 = 3, exclude chosen[3]=99
+        rb = opera._detect_retrospection(
+            OPERAConfig(threshold=15, retrospection_window=20)
+        )
+        assert rb == (
+            0,
+            3,
+            99,
+        )  # beam 0, target_len = 12-10+1 = 3, exclude chosen[3]=99
 
     def test_below_threshold_no_trigger(self):
         opera = OPERA(torch.nn.Module(), DummyProcessor())
         opera._response_start = 10
         opera._penalty_columns = [[12] * 14 + [13, 14]]
         opera._chosen_tokens = [[99] * 20]
-        assert opera._detect_retrospection(OPERAConfig(threshold=15, retrospection_window=20)) is None
+        assert (
+            opera._detect_retrospection(
+                OPERAConfig(threshold=15, retrospection_window=20)
+            )
+            is None
+        )
 
 
 class TestOPERA:
     def test_registered_and_buildable(self):
         assert "opera" in list_mitigators()
-        m = build_mitigator("opera", torch.nn.Module(), DummyProcessor(), max_new_tokens=1)
+        m = build_mitigator(
+            "opera", torch.nn.Module(), DummyProcessor(), max_new_tokens=1
+        )
         assert isinstance(m, OPERA)
 
     def test_num_beams_one_rejected(self):
         with pytest.raises(MitigatorConfigError, match="num_beams"):
             OPERAConfig(num_beams=1)
+
+    def test_batch_is_rejected_instead_of_mixing_beam_groups(self):
+        opera = OPERA(torch.nn.Module(), DummyProcessor())
+        inputs = {
+            "input_ids": torch.ones(2, 2, dtype=torch.long),
+            "attention_mask": torch.ones(2, 2, dtype=torch.long),
+        }
+        with pytest.raises(NotImplementedError, match="batch_size=1"):
+            opera._beam_search_loop(inputs, opera.config)
+
+    def test_reads_sequence_length_from_legacy_cache(self):
+        opera = OPERA(torch.nn.Module(), DummyProcessor())
+        key = torch.zeros(2, 4, 7, 8)
+        value = torch.zeros_like(key)
+        assert opera._kv_len(((key, value),), fallback=99) == 7
+
+    def test_selected_penalty_columns_are_persisted(self):
+        class ScriptedOPERA(OPERA):
+            def _step_forward(self, input_ids, attention_mask, inputs, past_key_values):
+                batch_size = input_ids.shape[0]
+                kv_len = attention_mask.shape[1]
+                logits = torch.tensor([0.0, 3.0, 2.0, 1.0]).repeat(batch_size, 1)
+                key = torch.zeros(batch_size, 1, kv_len, 1)
+                cache = ((key, key.clone()),)
+                attn = torch.full((batch_size, 1, 1, kv_len), 1.0 / kv_len)
+                return logits, cache, attn
+
+            def _lookahead_row(self, beam_idx, token, past, kv_len, device):
+                row = torch.zeros(kv_len + 1, device=device)
+                row[-1] = 1.0
+                return row
+
+        opera = ScriptedOPERA(
+            torch.nn.Module(),
+            DummyProcessor(),
+            num_beams=2,
+            num_attn_candidates=2,
+            max_new_tokens=1,
+        )
+        inputs = opera._prepare_inputs(None, "ignored", opera.config)
+        opera._beam_search_loop(inputs, opera.config)
+        assert len(opera._penalty_columns) == 2
+        assert all(len(columns) == 1 for columns in opera._penalty_columns)

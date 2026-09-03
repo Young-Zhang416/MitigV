@@ -22,13 +22,20 @@ class VectorModel(torch.nn.Module):
         self.vocab_size = vocab_size
         self.dummy = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, input_ids=None, attention_mask=None, past_key_values=None,
-                use_cache=True, return_dict=True, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+        **kwargs,
+    ):
         pv = kwargs.get("pixel_values")
         key = 0 if pv is None else int(pv.sum().item())
         vec = self.logits_map[key]
-        b, l = input_ids.shape
-        logits = vec.view(1, 1, -1).expand(b, l, -1)
+        batch_size, seq_len = input_ids.shape
+        logits = vec.view(1, 1, -1).expand(batch_size, seq_len, -1)
         return SimpleNamespace(logits=logits, past_key_values=0)
 
 
@@ -80,16 +87,29 @@ class TestCrop:
         # cropped box should be a 50x50 square centered at (50, 50)
         assert out.size == (50, 50)
 
+    def test_edge_saliency_keeps_requested_crop_size(self):
+        img = Image.new("RGB", (120, 100))
+        sal = torch.zeros(4)
+        sal[0] = 1.0
+        out = AGLA._crop_one(None, img, sal, AGLAConfig(crop_ratio=0.5))
+        assert out.size == (50, 50)
+
 
 class TestAGLA:
     def test_registered_and_buildable(self):
         assert "agla" in list_mitigators()
-        m = build_mitigator("agla", VectorModel({0: torch.tensor([1.0, 0.0, 0.0])}, 3),
-                            AglaProcessor(VOCAB), max_new_tokens=1)
+        m = build_mitigator(
+            "agla",
+            VectorModel({0: torch.tensor([1.0, 0.0, 0.0])}, 3),
+            AglaProcessor(VOCAB),
+            max_new_tokens=1,
+        )
         assert isinstance(m, AGLA)
 
     def test_step_logits_adds_local(self):
-        model = VectorModel({0: torch.tensor([1.0, 0.0, 0.0]), 1: torch.tensor([0.0, 1.0, 0.0])}, 3)
+        model = VectorModel(
+            {0: torch.tensor([1.0, 0.0, 0.0]), 1: torch.tensor([0.0, 1.0, 0.0])}, 3
+        )
         agla = AGLA(model, AglaProcessor(VOCAB), alpha=2.0)
 
         inputs = {
@@ -116,3 +136,10 @@ class TestAGLA:
         agla = AGLA(model, AglaProcessor(VOCAB))
         inputs = {"input_ids": torch.tensor([[1, 7, 7, 2, 3]])}
         assert agla._image_token_span(inputs) == (1, 3)
+
+    def test_single_placeholder_expands_to_model_image_sequence(self):
+        model = torch.nn.Module()
+        model.config = SimpleNamespace(image_token_index=7, image_seq_length=576)
+        agla = AGLA(model, AglaProcessor(VOCAB))
+        inputs = {"input_ids": torch.tensor([[1, 7, 2, 3]])}
+        assert agla._image_token_span(inputs) == (1, 577)

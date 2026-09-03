@@ -1,4 +1,4 @@
-"""Tests for beam search in :mod:`mitigv.backends.hf`."""
+"""Tests for beam search in :mod:`mitigv.backends.generic`."""
 
 from types import SimpleNamespace
 
@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from mitigv import MitigatorConfigError
-from mitigv.backends.hf import HFMitigator
+from mitigv.backends.generic import GenericMitigator
 
 
 VOCAB = {0: "<pad>", 1: "a", 2: "b", 3: "<eos>"}
@@ -21,22 +21,31 @@ class BeamModel(torch.nn.Module):
 
     def __init__(self, step_logits, vocab_size):
         super().__init__()
-        self.step_logits = [torch.as_tensor(v, dtype=torch.float32) for v in step_logits]
+        self.step_logits = [
+            torch.as_tensor(v, dtype=torch.float32) for v in step_logits
+        ]
         self.vocab_size = vocab_size
         self.dummy = torch.nn.Parameter(torch.zeros(1))
         self.reorder_calls = []
 
-    def forward(self, input_ids=None, attention_mask=None, past_key_values=None,
-                use_cache=True, return_dict=True, **kwargs):
-        b, l = input_ids.shape
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+        **kwargs,
+    ):
+        batch_size, seq_len = input_ids.shape
         if past_key_values is None:
             step = 0
-            cache = torch.zeros(b, 1, dtype=torch.long)
+            cache = torch.zeros(batch_size, 1, dtype=torch.long)
         else:
             step = int(past_key_values[0, 0].item()) + 1
-            cache = torch.full((b, 1), step, dtype=torch.long)
+            cache = torch.full((batch_size, 1), step, dtype=torch.long)
         vec = self.step_logits[min(step, len(self.step_logits) - 1)]
-        logits = vec.view(1, 1, -1).expand(b, l, -1)
+        logits = vec.view(1, 1, -1).expand(batch_size, seq_len, -1)
         return SimpleNamespace(logits=logits, past_key_values=cache)
 
     def _reorder_cache(self, past_key_values, beam_idx):
@@ -76,30 +85,49 @@ class DummyProcessor:
         return out
 
 
-STEP_LOGITS = [torch.tensor([0.0, 2.0, 1.0, -10.0]),  # step 0: a=2 > b=1
-               torch.tensor([0.0, 10.0, 20.0, -10.0])]  # step 1: b=20 > a=10
+STEP_LOGITS = [
+    torch.tensor([0.0, 2.0, 1.0, -10.0]),  # step 0: a=2 > b=1
+    torch.tensor([0.0, 10.0, 20.0, -10.0]),
+]  # step 1: b=20 > a=10
 
 
 class TestBeamSearch:
     def test_returns_top_beams(self):
         model = BeamModel(STEP_LOGITS, 4)
-        m = HFMitigator(model, DummyProcessor(VOCAB), num_beams=2,
-                        num_return_sequences=2, max_new_tokens=2)
+        m = GenericMitigator(
+            model,
+            DummyProcessor(VOCAB),
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=2,
+        )
         # top path: a->b (22); second: b->b (21)
         assert m(None, "a") == ["ab", "bb"]
 
     def test_single_return_sequence(self):
         model = BeamModel(STEP_LOGITS, 4)
-        m = HFMitigator(model, DummyProcessor(VOCAB), num_beams=2,
-                        num_return_sequences=1, max_new_tokens=2)
+        m = GenericMitigator(
+            model,
+            DummyProcessor(VOCAB),
+            num_beams=2,
+            num_return_sequences=1,
+            max_new_tokens=2,
+        )
         assert m(None, "a") == "ab"
 
     def test_eos_early_stopping(self):
-        step_logits = [torch.tensor([0.0, 2.0, 1.0, -10.0]),
-                       torch.tensor([-10.0, -10.0, -10.0, 10.0])]  # eos dominates
+        step_logits = [
+            torch.tensor([0.0, 2.0, 1.0, -10.0]),
+            torch.tensor([-10.0, -10.0, -10.0, 10.0]),
+        ]  # eos dominates
         model = BeamModel(step_logits, 4)
-        m = HFMitigator(model, DummyProcessor(VOCAB, eos_token_id=3), num_beams=2,
-                        num_return_sequences=2, max_new_tokens=10)
+        m = GenericMitigator(
+            model,
+            DummyProcessor(VOCAB, eos_token_id=3),
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=10,
+        )
         out = m(None, "a")
         assert out == ["a", "b"]  # [a, eos] and [b, eos] -> eos stripped
         # early stopping: reorder once per completed step (2), not max_new_tokens
@@ -107,8 +135,13 @@ class TestBeamSearch:
 
     def test_cache_reordering_is_invoked(self):
         model = BeamModel(STEP_LOGITS, 4)
-        m = HFMitigator(model, DummyProcessor(VOCAB), num_beams=2,
-                        num_return_sequences=2, max_new_tokens=2)
+        m = GenericMitigator(
+            model,
+            DummyProcessor(VOCAB),
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=2,
+        )
         m(None, "a")
         assert len(model.reorder_calls) == 2
         assert model.reorder_calls[0].tolist() == [0, 0]  # both beams from beam 0
@@ -116,19 +149,42 @@ class TestBeamSearch:
 
     def test_batch_beam_search(self):
         model = BeamModel(STEP_LOGITS, 4)
-        m = HFMitigator(model, DummyProcessor(VOCAB), num_beams=2,
-                        num_return_sequences=1, max_new_tokens=2)
+        m = GenericMitigator(
+            model,
+            DummyProcessor(VOCAB),
+            num_beams=2,
+            num_return_sequences=1,
+            max_new_tokens=2,
+        )
         assert m(None, ["a", "b"]) == ["ab", "ab"]
 
     def test_num_return_cannot_exceed_beams(self):
         model = BeamModel([torch.tensor([0.0, 0.0, 0.0, 0.0])], 4)
         with pytest.raises(MitigatorConfigError, match="num_return_sequences"):
-            HFMitigator(model, DummyProcessor(VOCAB), num_beams=1, num_return_sequences=2)
+            GenericMitigator(
+                model, DummyProcessor(VOCAB), num_beams=1, num_return_sequences=2
+            )
 
     def test_negative_length_penalty_raises(self):
         model = BeamModel([torch.tensor([0.0, 0.0, 0.0, 0.0])], 4)
         with pytest.raises(MitigatorConfigError, match="length_penalty"):
-            HFMitigator(model, DummyProcessor(VOCAB), num_beams=2, length_penalty=-1.0)
+            GenericMitigator(model, DummyProcessor(VOCAB), num_beams=2, length_penalty=-1.0)
+
+    def test_early_stopping_waits_for_full_finished_beam_set(self):
+        step_logits = [
+            torch.tensor([-10.0, 2.0, 1.0, 3.0]),
+            torch.tensor([-10.0, -10.0, -10.0, 10.0]),
+        ]
+        model = BeamModel(step_logits, 4)
+        m = GenericMitigator(
+            model,
+            DummyProcessor(VOCAB, eos_token_id=3),
+            num_beams=2,
+            num_return_sequences=1,
+            max_new_tokens=5,
+        )
+        m(None, "a")
+        assert len(model.reorder_calls) >= 2
 
 
 class TestVCDBeamSearch:
@@ -145,10 +201,20 @@ class TestVCDBeamSearch:
                 super()._reorder_aux_cache(beam_idx)
 
         model = BeamModel(STEP_LOGITS, 4)
-        processor = DummyProcessor(VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)})
-        m = SpyVCD(model, processor, num_beams=2, num_return_sequences=2, max_new_tokens=2,
-                   alpha=1.0, beta=0.0, distortion="gaussian_noise",
-                   distortion_kwargs={"std": 0.0})
+        processor = DummyProcessor(
+            VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)}
+        )
+        m = SpyVCD(
+            model,
+            processor,
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=2,
+            alpha=1.0,
+            beta=0.0,
+            distortion="gaussian_noise",
+            distortion_kwargs={"std": 0.0},
+        )
         # identical branches (std=0, pixel-agnostic model) -> same as plain beam search
         assert m(None, "a") == ["ab", "bb"]
         assert len(m.aux_calls) == 2  # reordered after both steps
@@ -157,9 +223,16 @@ class TestVCDBeamSearch:
         from mitigv.algorithms.vcd import VCD
 
         model = BeamModel(STEP_LOGITS, 4)
-        processor = DummyProcessor(VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)})
-        m = VCD(model, processor, num_beams=3, distortion="gaussian_noise",
-                distortion_kwargs={"std": 0.0})
+        processor = DummyProcessor(
+            VOCAB, extra_inputs={"pixel_values": torch.zeros(1, 1)}
+        )
+        m = VCD(
+            model,
+            processor,
+            num_beams=3,
+            distortion="gaussian_noise",
+            distortion_kwargs={"std": 0.0},
+        )
         inputs = m._prepare_inputs(None, "a", m.config)  # batch 1
         assert inputs["pixel_values"].shape[0] == 1
         m._expand_inputs_for_beams(inputs, 3)

@@ -6,7 +6,7 @@ from the original image against those from a distorted image::
     logits = (1 + alpha) * logits(v) - alpha * logits(v')
 
 optionally followed by an adaptive plausibility constraint (``beta``) that masks
-tokens unlikely under the distorted distribution.
+tokens unlikely under the original-image distribution.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any
 
 import torch
 
-from mitigv.backends.hf import HFMitigator, HFMitigatorConfig
+from mitigv.backends.generic import GenericMitigator, GenericMitigatorConfig
 from mitigv.core.base import MitigatorConfigError
 from mitigv.core.registry import register_mitigator
 from mitigv.perturbations import build_perturbation
@@ -24,7 +24,7 @@ from mitigv.perturbations import build_perturbation
 __all__ = ["VCDConfig", "VCD"]
 
 
-class VCDConfig(HFMitigatorConfig):
+class VCDConfig(GenericMitigatorConfig):
     """Hyper-parameters for VCD.
 
     Attributes:
@@ -41,14 +41,16 @@ class VCDConfig(HFMitigatorConfig):
 
     def validate(self) -> None:
         super().validate()
+        if not isinstance(self.distortion_kwargs, dict):
+            raise MitigatorConfigError("distortion_kwargs must be a dictionary")
         if self.alpha < 0:
             raise MitigatorConfigError("alpha must be >= 0")
-        if self.beta < 0:
-            raise MitigatorConfigError("beta must be >= 0")
+        if not (0.0 <= self.beta <= 1.0):
+            raise MitigatorConfigError("beta must be in [0, 1]")
 
 
 @register_mitigator("vcd")
-class VCD(HFMitigator):
+class VCD(GenericMitigator):
     """Visual Contrastive Decoding.
 
     At every decoding step it runs the model on both the original and a
@@ -60,9 +62,18 @@ class VCD(HFMitigator):
     config_class = VCDConfig
 
     # -- input preparation -----------------------------------------------------
-    def _prepare_inputs(self, images: Any, prompt: str, cfg: VCDConfig) -> dict[str, Any]:
+    def _prepare_inputs(
+        self, images: Any, prompt: str, cfg: VCDConfig
+    ) -> dict[str, Any]:
         inputs = super()._prepare_inputs(images, prompt, cfg)
-        self._distorted_inputs = self._distort(inputs, cfg)
+        image_keys = self._image_keys(inputs)
+        if cfg.alpha > 0 and not image_keys:
+            raise ValueError(
+                "VCD requires a processor output containing pixel_values or images"
+            )
+        self._distorted_inputs = (
+            self._distort(inputs, cfg) if cfg.alpha > 0 else dict(inputs)
+        )
         self._distorted_past = None
         return inputs
 
@@ -86,7 +97,9 @@ class VCD(HFMitigator):
         """Reorder the distorted-branch cache during beam search."""
         self._distorted_past = self._reorder_cache(self._distorted_past, beam_idx)
 
-    def _expand_inputs_for_beams(self, inputs: dict[str, Any], num_beams: int) -> dict[str, Any]:
+    def _expand_inputs_for_beams(
+        self, inputs: dict[str, Any], num_beams: int
+    ) -> dict[str, Any]:
         """Expand the main inputs *and* the distorted-branch inputs for beam search."""
         expanded = super()._expand_inputs_for_beams(inputs, num_beams)
         self._distorted_inputs = super()._expand_inputs_for_beams(
@@ -104,11 +117,16 @@ class VCD(HFMitigator):
         step: int,
         cfg: VCDConfig,
     ) -> tuple[torch.Tensor, Any]:
-        logits_v, past = self._forward(input_ids, attention_mask, inputs, past_key_values)
-        logits_vp, self._distorted_past = self._forward(
-            input_ids, attention_mask, self._distorted_inputs, self._distorted_past
+        logits_v, past = self._forward(
+            input_ids, attention_mask, inputs, past_key_values
         )
-        logits = (1.0 + cfg.alpha) * logits_v - cfg.alpha * logits_vp
+        if cfg.alpha > 0:
+            logits_vp, self._distorted_past = self._forward(
+                input_ids, attention_mask, self._distorted_inputs, self._distorted_past
+            )
+            logits = (1.0 + cfg.alpha) * logits_v - cfg.alpha * logits_vp
+        else:
+            logits = logits_v
         if cfg.beta > 0:
             logits = self._adaptive_plausibility(logits, logits_v, cfg.beta)
         return logits, past
@@ -126,7 +144,8 @@ class VCD(HFMitigator):
 
         Tokens whose original logits fall below ``cutoff`` are set to ``-inf``.
         """
-        cutoff = torch.log(
-            torch.tensor(beta, device=logits.device, dtype=logits.dtype)
-        ) + logits_original.max(dim=-1, keepdim=True).values
+        cutoff = (
+            torch.log(torch.tensor(beta, device=logits.device, dtype=logits.dtype))
+            + logits_original.max(dim=-1, keepdim=True).values
+        )
         return logits.masked_fill(logits_original < cutoff, float("-inf"))

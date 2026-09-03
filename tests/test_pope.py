@@ -1,8 +1,8 @@
-"""Tests for :mod:`evaluators.pope`."""
+"""Tests for :mod:`mitigv.evaluation.pope`."""
 
 import pytest
 
-from evaluators.pope import (
+from mitigv.evaluation.pope import (
     METRIC_NAMES,
     REFERENCE,
     compare_to_reference,
@@ -44,6 +44,10 @@ class TestComputeMetrics:
     def test_unknown_label_raises(self):
         with pytest.raises(ValueError, match="unexpected ground-truth"):
             compute_metrics(["maybe"], ["yes"])
+
+    def test_empty_input_raises(self):
+        with pytest.raises(ValueError, match="must not be empty"):
+            compute_metrics([], [])
 
 
 class TestCompareToReference:

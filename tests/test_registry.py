@@ -57,6 +57,7 @@ class TestRegistry:
         @register_mitigator
         class M(BaseMitigator):
             algorithm_name = "bare"
+
             def generate(self, images, prompt, **kwargs):
                 self._ensure_ready()
                 return prompt
@@ -68,6 +69,7 @@ class TestRegistry:
         @register_mitigator("key")
         class M(BaseMitigator):
             algorithm_name = "other"
+
             def generate(self, images, prompt, **kwargs):
                 return prompt
 
@@ -76,15 +78,18 @@ class TestRegistry:
 
     def test_decorator_rejects_non_subclass(self):
         with pytest.raises(TypeError, match="BaseMitigator"):
+
             @register_mitigator("nope")
             class NotAMitigator:
                 pass
 
     def test_requires_name(self):
         with pytest.raises(ValueError, match="algorithm_name"):
+
             @register_mitigator
             class M(BaseMitigator):
                 algorithm_name = ""
+
                 def generate(self, images, prompt, **kwargs):
                     return prompt
 
@@ -117,18 +122,23 @@ class TestRegistry:
         class M(BaseMitigator):
             algorithm_name = "cfg"
             config_class = Cfg
+
             def generate(self, images, prompt, **kwargs):
                 self._ensure_ready()
                 return prompt
 
-        m = build_mitigator("cfg", MODEL, PROCESSOR, config={"alpha": 5.0}, max_new_tokens=7)
+        m = build_mitigator(
+            "cfg", MODEL, PROCESSOR, config={"alpha": 5.0}, max_new_tokens=7
+        )
         assert m.config.alpha == 5.0
         assert m.config.max_new_tokens == 7
 
     def test_list_is_registered_get(self):
         register_mitigator("zeta")(_class("zeta"))
         register_mitigator("alpha")(_class("alpha"))
-        assert list_mitigators() == ["alpha", "zeta"]
+        assert {"alpha", "zeta", "vcd", "linear_probe_steer"} <= set(
+            list_mitigators()
+        )
         assert is_registered("alpha")
         assert not is_registered("nope")
         assert isinstance(get_mitigator_class("alpha"), type)
@@ -141,7 +151,13 @@ class TestRegistry:
         assert len(registry) == 2
         registry.clear()
         assert len(registry) == 0
-        assert list_mitigators() == []
+        assert "vcd" in list_mitigators()
+
+    def test_lazy_load_handles_module_name_that_differs_from_algorithm(self):
+        registry.clear()
+        cls = get_mitigator_class("linear_probe_steer")
+        assert cls.algorithm_name == "linear_probe_steer"
+        assert registry.get("linear_probe_steer") is cls
 
     def test_register_rejects_non_subclass(self):
         with pytest.raises(TypeError, match="BaseMitigator"):

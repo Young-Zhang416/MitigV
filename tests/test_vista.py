@@ -17,6 +17,11 @@ class IdentityLayer(torch.nn.Module):
         return hidden_states
 
 
+class TupleLayer(torch.nn.Module):
+    def forward(self, hidden_states, *args, **kwargs):
+        return hidden_states, "cache"
+
+
 class FakeLm(torch.nn.Module):
     def __init__(self, n_layers):
         super().__init__()
@@ -33,16 +38,24 @@ class FakeVlm(torch.nn.Module):
         self.vocab_size = vocab_size
         self.dummy = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, input_ids=None, attention_mask=None, pixel_values=None,
-                use_cache=True, return_dict=True, output_hidden_states=False, **kwargs):
-        b, l = input_ids.shape
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        pixel_values=None,
+        use_cache=True,
+        return_dict=True,
+        output_hidden_states=False,
+        **kwargs,
+    ):
+        batch_size, seq_len = input_ids.shape
         base = 2.0 if pixel_values is not None else 0.0
-        h = torch.full((b, l, self.hidden_dim), base)
+        h = torch.full((batch_size, seq_len, self.hidden_dim), base)
         hidden_states = [h]
         for layer in self.language_model.layers:
             h = layer(h)
             hidden_states.append(h)
-        logits = torch.zeros(b, l, self.vocab_size)
+        logits = torch.zeros(batch_size, seq_len, self.vocab_size)
         logits[..., 1] = 1.0
         out = SimpleNamespace(logits=logits, past_key_values=0)
         if output_hidden_states:
@@ -127,6 +140,19 @@ class TestInjection:
         out = layer(torch.zeros(1, 1, 2))
         assert torch.equal(out, torch.zeros(1, 1, 2))  # hook removed
 
+    def test_tuple_layer_output_is_preserved(self):
+        model = FakeVlm(n_layers=1, hidden_dim=2, vocab_size=4)
+        model.language_model.layers[0] = TupleLayer()
+        vista = VISTA(model, VistaProcessor(VOCAB), steer_strength=0.01)
+        vista._steer_vectors = [torch.tensor([[2.0, 2.0]])]
+        vista._on_generate_start(vista.config)
+        try:
+            hidden, cache = model.language_model.layers[0](torch.zeros(1, 1, 2))
+            assert torch.allclose(hidden, torch.full((1, 1, 2), 0.02))
+            assert cache == "cache"
+        finally:
+            vista._on_generate_end()
+
 
 class TestVISTA:
     def test_registered_and_buildable(self):
@@ -136,12 +162,16 @@ class TestVISTA:
 
     def test_end_to_end_runs(self):
         model = FakeVlm(n_layers=3, hidden_dim=2, vocab_size=4)
-        vista = VISTA(model, VistaProcessor(VOCAB), steer_strength=0.01, max_new_tokens=2)
+        vista = VISTA(
+            model, VistaProcessor(VOCAB), steer_strength=0.01, max_new_tokens=2
+        )
         assert vista(torch.zeros(1, 1), "a") == "aa"
 
     def test_zero_strength_no_hooks(self):
         model = FakeVlm(n_layers=3, hidden_dim=2, vocab_size=4)
-        vista = VISTA(model, VistaProcessor(VOCAB), steer_strength=0.0, max_new_tokens=1)
+        vista = VISTA(
+            model, VistaProcessor(VOCAB), steer_strength=0.0, max_new_tokens=1
+        )
         vista._steer_vectors = [torch.tensor([[2.0, 2.0]])]
         vista._on_generate_start(vista.config)
         assert vista._steer_hooks == []

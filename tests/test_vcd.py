@@ -51,12 +51,21 @@ class ScriptedModel(torch.nn.Module):
         self.vocab_size = vocab_size
         self.dummy = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, input_ids=None, attention_mask=None, past_key_values=None,
-                use_cache=True, return_dict=True, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+        **kwargs,
+    ):
         step = 0 if past_key_values is None else past_key_values + 1
         token = self.script[min(step, len(self.script) - 1)]
-        b, l = input_ids.shape
-        logits = torch.full((b, l, self.vocab_size), -1e9, dtype=torch.float32)
+        batch_size, seq_len = input_ids.shape
+        logits = torch.full(
+            (batch_size, seq_len, self.vocab_size), -1e9, dtype=torch.float32
+        )
         logits[..., token] = 0.0
         return SimpleNamespace(logits=logits, past_key_values=step)
 
@@ -70,13 +79,20 @@ class VectorModel(torch.nn.Module):
         self.vocab_size = vocab_size
         self.dummy = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, input_ids=None, attention_mask=None, past_key_values=None,
-                use_cache=True, return_dict=True, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+        **kwargs,
+    ):
         pv = kwargs.get("pixel_values")
         key = 0 if pv is None else int(pv.sum().item())
         vec = self.logits_map[key]
-        b, l = input_ids.shape
-        logits = vec.view(1, 1, -1).expand(b, l, -1)
+        batch_size, seq_len = input_ids.shape
+        logits = vec.view(1, 1, -1).expand(batch_size, seq_len, -1)
         return SimpleNamespace(logits=logits, past_key_values=0)
 
 
@@ -109,6 +125,8 @@ class TestVCD:
             VCDConfig(alpha=-1.0)
         with pytest.raises(MitigatorConfigError, match="beta"):
             VCDConfig(beta=-0.5)
+        with pytest.raises(MitigatorConfigError, match="distortion_kwargs"):
+            VCDConfig(distortion_kwargs=[])
 
     def test_end_to_end_identical_branches_cancel(self):
         # ScriptedModel ignores pixel_values, so both branches agree and the
@@ -125,7 +143,9 @@ class TestVCD:
             distortion_kwargs={"std": 1.0},
         )
         inputs = vcd._prepare_inputs(None, "ab", vcd.config)
-        assert not torch.equal(inputs["pixel_values"], vcd._distorted_inputs["pixel_values"])
+        assert not torch.equal(
+            inputs["pixel_values"], vcd._distorted_inputs["pixel_values"]
+        )
         assert torch.equal(inputs["input_ids"], vcd._distorted_inputs["input_ids"])
 
     def test_contrast_formula(self):
@@ -133,8 +153,10 @@ class TestVCD:
             {0: torch.tensor([1.0, 0.0, 0.0]), 1: torch.tensor([0.0, 1.0, 0.0])},
             vocab_size=3,
         )
-        processor = DummyProcessor({0: "<pad>", 1: "a", 2: "b"},
-                                   extra_inputs={"pixel_values": torch.zeros(1, 1)})
+        processor = DummyProcessor(
+            {0: "<pad>", 1: "a", 2: "b"},
+            extra_inputs={"pixel_values": torch.zeros(1, 1)},
+        )
         vcd = VCD(model, processor, alpha=2.0, beta=0.0)
 
         inputs = {
@@ -174,8 +196,10 @@ class TestVCD:
             {0: torch.tensor([0.0, 5.0, 0.0]), 1: torch.tensor([10.0, 0.0, 10.0])},
             vocab_size=3,
         )
-        processor = DummyProcessor({0: "<pad>", 1: "a", 2: "b"},
-                                   extra_inputs={"pixel_values": torch.zeros(1, 1)})
+        processor = DummyProcessor(
+            {0: "<pad>", 1: "a", 2: "b"},
+            extra_inputs={"pixel_values": torch.zeros(1, 1)},
+        )
         vcd = VCD(model, processor, alpha=1.0, beta=0.1)
 
         inputs = {

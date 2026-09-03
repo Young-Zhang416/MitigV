@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Training-free hallucination mitigation algorithms for large vision-language models (VCD, PAI, ...)."
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = ["torch>=2.0,<3"]
 authors = [{ name = "MitigV contributors" }]
+keywords = ["vision-language-model", "hallucination", "multimodal", "decoding"]
 classifiers = [
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
@@ -16,12 +18,49 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-torch = ["torch>=2.0"]
-transformers = ["transformers>=4.40"]
-test = ["pytest>=7"]
+transformers = [
+    "transformers>=5.0,<6",
+    "accelerate>=0.26",
+    "pillow>=9",
+]
+eval = [
+    "transformers>=5.0,<6",
+    "accelerate>=0.26",
+    "pillow>=9",
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "pyarrow>=10",
+]
+test = [
+    "pytest>=7",
+    "transformers>=5.0,<6",
+    "pillow>=9",
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "ruff>=0.9",
+]
+all = [
+    "transformers>=5.0,<6",
+    "accelerate>=0.26",
+    "pillow>=9",
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "pyarrow>=10",
+]
+
+[project.scripts]
+mitigv-chair = "mitigv.evaluation.chair:main"
+mitigv-judge = "mitigv.evaluation.judge:main"
+mitigv-discriminative = "mitigv.evaluation.discriminative:main"
+mitigv-length-analysis = "mitigv.evaluation.length_analysis:main"
+mitigv-pope = "mitigv.evaluation.run_pope:main"
+mitigv-train-probe = "mitigv.evaluation.train_probe:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+mitigv = ["evaluation/data/*.txt", "evaluation/prompts/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

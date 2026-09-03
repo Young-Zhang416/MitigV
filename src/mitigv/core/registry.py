@@ -27,6 +27,18 @@ __all__ = [
     "is_registered",
 ]
 
+_BUILTIN_ALGORITHMS: dict[str, tuple[str, str]] = {
+    "agla": ("mitigv.algorithms.agla", "AGLA"),
+    "icd": ("mitigv.algorithms.icd", "ICD"),
+    "linear_probe_steer": ("mitigv.algorithms.probe_steer", "LinearProbeSteer"),
+    "m3id": ("mitigv.algorithms.m3id", "M3ID"),
+    "only": ("mitigv.algorithms.only", "ONLY"),
+    "opera": ("mitigv.algorithms.opera", "OPERA"),
+    "pai": ("mitigv.algorithms.pai", "PAI"),
+    "vcd": ("mitigv.algorithms.vcd", "VCD"),
+    "vista": ("mitigv.algorithms.vista", "VISTA"),
+}
+
 
 class MitigatorRegistry:
     """Maps algorithm names to :class:`BaseMitigator` subclasses.
@@ -138,7 +150,9 @@ def register_mitigator(
 
 
 def get_mitigator_class(name: str) -> type[BaseMitigator]:
-    """Return the registered mitigator class for ``name``."""
+    """Return a custom or lazily loaded built-in mitigator class."""
+
+    _import_algorithm_module(name)
     return registry.get(name)
 
 
@@ -158,11 +172,7 @@ def build_mitigator(
 
         build_mitigator("vcd", model, processor, alpha=2.0, beta=0.1)
     """
-    try:
-        cls = registry.get(name)
-    except KeyError:
-        _import_algorithm_module(name)
-        cls = registry.get(name)
+    cls = get_mitigator_class(name)
     return cls(model=model, processor=processor, config=config, **kwargs)
 
 
@@ -175,20 +185,30 @@ def _import_algorithm_module(name: str) -> None:
     """
     import importlib
 
-    module_name = f"mitigv.algorithms.{name}"
+    if name in registry:
+        return
+    module_name, class_name = _BUILTIN_ALGORITHMS.get(
+        name, (f"mitigv.algorithms.{name}", "")
+    )
     try:
-        importlib.import_module(module_name)
+        module = importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
         if exc.name == module_name:
             return
         raise
+    # Importing registers normal modules. Explicit registration also makes the
+    # lookup resilient after registry.clear() in plugin or test environments.
+    if name not in registry and class_name:
+        registry.register(name, getattr(module, class_name))
 
 
 def list_mitigators() -> list[str]:
-    """Return the sorted names of all registered mitigators."""
-    return registry.names()
+    """Return all built-in and custom algorithm names."""
+
+    return sorted(set(_BUILTIN_ALGORITHMS) | set(registry.names()))
 
 
 def is_registered(name: str) -> bool:
-    """Return whether ``name`` is currently registered."""
-    return name in registry
+    """Return whether ``name`` is available as a built-in or custom algorithm."""
+
+    return name in registry or name in _BUILTIN_ALGORITHMS

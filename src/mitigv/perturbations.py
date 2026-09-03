@@ -9,6 +9,8 @@ logits distributions.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import math
+from numbers import Real
 from typing import Any, Callable, ClassVar
 
 import torch
@@ -45,9 +47,27 @@ class GaussianNoisePerturbation(Perturbation):
 
     name = "gaussian_noise"
 
-    def __init__(self, std: float = 0.1, clip: tuple[float, float] | None = None) -> None:
-        if std < 0:
+    def __init__(
+        self, std: float = 0.1, clip: tuple[float, float] | None = None
+    ) -> None:
+        if (
+            not isinstance(std, Real)
+            or isinstance(std, bool)
+            or not math.isfinite(float(std))
+            or std < 0
+        ):
             raise ValueError(f"std must be >= 0, got {std}")
+        if clip is not None:
+            if (
+                not isinstance(clip, (tuple, list))
+                or len(clip) != 2
+                or not all(
+                    isinstance(v, Real) and math.isfinite(float(v)) for v in clip
+                )
+            ):
+                raise ValueError("clip must contain two finite bounds")
+            if clip[0] > clip[1]:
+                raise ValueError("clip lower bound cannot exceed upper bound")
         self.std = float(std)
         self.clip = clip
 
@@ -69,8 +89,18 @@ class DiffusionNoisePerturbation(Perturbation):
     name = "diffusion_noise"
 
     def __init__(self, noise_step: int = 500, num_steps: int = 1000) -> None:
+        if not isinstance(noise_step, int) or isinstance(noise_step, bool):
+            raise ValueError("noise_step must be an integer")
+        if (
+            not isinstance(num_steps, int)
+            or isinstance(num_steps, bool)
+            or num_steps < 1
+        ):
+            raise ValueError("num_steps must be a positive integer")
         if not (0 <= noise_step < num_steps):
-            raise ValueError(f"noise_step must be in [0, {num_steps}), got {noise_step}")
+            raise ValueError(
+                f"noise_step must be in [0, {num_steps}), got {noise_step}"
+            )
         self.noise_step = int(noise_step)
         self.num_steps = int(num_steps)
         self._alpha_bar = self._make_schedule(num_steps)

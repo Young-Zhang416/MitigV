@@ -15,15 +15,30 @@ from typing import Any, Sequence
 #: LLaVA-1.5-7B on the MSCOCO POPE benchmark.
 REFERENCE: dict[str, dict[str, dict[str, float]]] = {
     "random": {
-        "Regular": {"accuracy": 83.29, "precision": 92.13, "recall": 72.80, "f1": 81.33},
+        "Regular": {
+            "accuracy": 83.29,
+            "precision": 92.13,
+            "recall": 72.80,
+            "f1": 81.33,
+        },
         "VCD": {"accuracy": 87.73, "precision": 91.42, "recall": 83.28, "f1": 87.16},
     },
     "popular": {
-        "Regular": {"accuracy": 81.88, "precision": 88.93, "recall": 72.80, "f1": 80.06},
+        "Regular": {
+            "accuracy": 81.88,
+            "precision": 88.93,
+            "recall": 72.80,
+            "f1": 80.06,
+        },
         "VCD": {"accuracy": 85.38, "precision": 86.92, "recall": 83.28, "f1": 85.06},
     },
     "adversarial": {
-        "Regular": {"accuracy": 78.96, "precision": 83.06, "recall": 72.75, "f1": 77.57},
+        "Regular": {
+            "accuracy": 78.96,
+            "precision": 83.06,
+            "recall": 72.75,
+            "f1": 77.57,
+        },
         "VCD": {"accuracy": 80.88, "precision": 79.45, "recall": 83.29, "f1": 81.33},
     },
 }
@@ -42,10 +57,14 @@ def load_pope(path: str) -> list[dict[str, Any]]:
     return items
 
 
-def compute_metrics(gt_labels: Sequence[str], gen_texts: Sequence[str]) -> dict[str, float]:
+def compute_metrics(
+    gt_labels: Sequence[str], gen_texts: Sequence[str]
+) -> dict[str, float]:
     """Compute POPE accuracy / precision / recall / F1 (percentages)."""
     if len(gt_labels) != len(gen_texts):
         raise ValueError("ground-truth and generated lists must have equal length")
+    if not gt_labels:
+        raise ValueError("ground-truth and generated lists must not be empty")
 
     true_pos = true_neg = false_pos = false_neg = 0
     yes_answers = 0

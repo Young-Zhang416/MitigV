@@ -1,12 +1,33 @@
 # MitigV
 
+<p align="center">
+  <img src="logo.png" alt="MitigV logo" width="520">
+</p>
+
 A library of **training-free** hallucination mitigation algorithms for large
 vision-language models (LVLMs). Instead of fine-tuning, these methods re-write
 the decoding process (logits, attention, or sampling) at generation time.
-Implemented algorithms: **VCD** (Visual Contrastive Decoding), **ICD**
-(Instruction Contrastive Decoding) and **PAI** (Paying More Attention to Image).
+Implemented algorithms include **VCD**, **ICD**, **PAI**, **M3ID**, **VISTA**,
+**AGLA**, **ONLY**, **OPERA**, and linear-probe steering.
 
 ## Quick start
+
+Load a supported checkpoint and create an algorithm in one call:
+
+```python
+from mitigv import load_mitigator
+
+vcd = load_mitigator(
+    "vcd",
+    model_type="qwen2.5-vl",  # or "llava"
+    model_id="Qwen/Qwen2.5-VL-7B-Instruct",
+    model_kwargs={"torch_dtype": "auto", "device_map": "auto"},
+    alpha=2.0,
+)
+text = vcd(image, "Describe the image.")
+```
+
+For already-loaded model and processor objects, use the context manager:
 
 ```python
 from mitigv import mitigate
@@ -20,11 +41,40 @@ with mitigate("vcd", VCDConfig(alpha=2.0), model=model, processor=processor,
 `mitigate` is a context manager: it builds the algorithm, yields a callable
 mitigator, and on exit restores the model's device and frees CUDA cache.
 
+中文入门与完整示例请参阅 [Tutorial.md](Tutorial.md)。
+
+## Installation
+
+```bash
+python -m pip install .                    # generic PyTorch backend
+python -m pip install ".[transformers]"   # LLaVA and Qwen2.5-VL
+python -m pip install ".[eval]"           # evaluation commands and dependencies
+```
+
+For development, use `python -m pip install -e ".[test,eval]"`.
+
 ## Design principles
 
 - **Uniform API** — every algorithm exposes the same `generate(images, prompt, **kwargs)` entry point, so callers can swap algorithms without touching their code.
 - **Inheritance & polymorphism** — all algorithms subclass `BaseMitigator`; the config system is a parallel hierarchy rooted at `MitigatorConfig`.
 - **Small modules, each tested** — the library grows one module at a time, with tests written alongside.
+
+## Implementation status and compatibility
+
+VCD, ICD, PAI, and M3ID implement their published decoding equations. VISTA
+currently implements the VSV component but not SLA. AGLA uses an internal
+LVLM-attention crop as a lightweight approximation of the paper's separate
+image-prompt matching/localization stage. LinearProbeSteer is a library-specific
+representative rather than a reproduction of one named paper. ONLY preserves
+the published TVER selection and adaptive fusion, but currently obtains the two
+logit branches with two forwards rather than the paper's optimized single-query
+implementation.
+
+The attention-patching algorithms depend on Llama attention internals and are
+tested against Transformers 5.x. PAI and ONLY therefore fail fast when required
+image-token positions cannot be inferred. OPERA currently supports batch size 1
+only because its rollback timeline is stateful; other algorithms support padded
+batches and normalize token inputs to left padding.
 
 ## Current state
 
@@ -107,16 +157,33 @@ text = m(images, prompt)
 Registration is idempotent for the same class under the same name; a *different*
 class under an existing name raises unless `override=True` is passed.
 
-### Module 3 — `mitigv.backends.hf`
+### Module 3 — `mitigv.backends`
 
-The HuggingFace-transformers decoding skeleton. `HFMitigator` implements a
-cache-aware autoregressive loop (greedy / sampling / **beam search**) and
-exposes small hooks so an algorithm implements only its intervention:
+The cache-aware autoregressive decoding skeleton. `GenericMitigator` (with
+`ModelMitigator` as a convenience alias) implements greedy /
+sampling / **beam search** and exposes small hooks so an algorithm implements
+only its intervention. It is framework-neutral: HuggingFace is one supported
+implementation, not a requirement.
+
+Any model and processor satisfying the following structural interfaces can be
+used:
+
+* `ModelProtocol`: callable with `input_ids`, optional `attention_mask`,
+  `past_key_values`, and `use_cache=True`; returns `logits` and optionally
+  `past_key_values` (as attributes, mapping keys, or tuple items).
+* `ProcessorProtocol`: callable with `text=...`, `images=...` returning a
+  mapping containing `input_ids`, and providing `batch_decode` (or `decode`).
+  Processors may alternatively expose `prepare_inputs(prompt, images)` or
+  `encode(prompt, images)`.
+
+The protocols are typing contracts (`ModelInterface` and
+`ProcessorInterface` are aliases), so no HuggingFace base class or inheritance
+is needed.
 
 ```python
-from mitigv import HFMitigator
+from mitigv import ModelMitigator
 
-class VCD(HFMitigator):
+class VCD(ModelMitigator):
     algorithm_name = "vcd"
 
     def _step_logits(self, input_ids, attention_mask, inputs, past, step, cfg):
@@ -140,7 +207,89 @@ Hooks (all overridable):
 Beam search is enabled with `num_beams > 1` and honors `length_penalty`,
 `early_stopping` and `num_return_sequences`. Visual inputs (`pixel_values`, ...)
 are forwarded only on the first step; the rest of the loop is KV-cache-aware.
-`HFMitigator` targets causal LMs / LVLMs with `use_cache=True`.
+`ModelMitigator` targets causal/autoregressive models with `use_cache=True`.
+Algorithms that inspect decoder-layer attention or hidden states (for example
+`PAI`, `ONLY`, `AGLA`, and `OPERA`) additionally require the corresponding
+optional hooks exposed by the model; the basic decoding and contrastive
+algorithms only use the interfaces above.
+
+For HuggingFace LLaVA, use `adapt_llava(model, processor)` from
+`mitigv.backends.llava`; all Transformers-specific handling stays in the
+adapter while algorithms remain backend-independent:
+
+```python
+from mitigv import build_mitigator
+from mitigv.backends.llava import adapt_llava
+
+model, processor = adapt_llava(model, processor)
+vcd = build_mitigator("vcd", model=model, processor=processor)
+text = vcd(image, "Describe the image.")
+```
+Adapters also expose lazy `from_pretrained(checkpoint)` factories when loading
+directly from Transformers is desired.
+
+Qwen2.5-VL is supported through `mitigv.backends.qwen2_5_vl`. Its adapter
+handles the Qwen chat template and preserves multimodal fields such as
+`image_grid_thw`, `video_grid_thw`, `mm_token_type_ids`, and `rope_deltas`.
+
+LLaVA and Qwen2.5-VL share the `VisionLanguageModelAdapter` and
+`VisionLanguageProcessorAdapter` parent contracts. Select the concrete model
+family through one parameter:
+
+```python
+from mitigv import load_vision_language
+
+model, processor = load_vision_language(
+    model_type="qwen2.5-vl",  # or "llava"
+    model_id="Qwen/Qwen2.5-VL-7B-Instruct",
+    model_kwargs={"torch_dtype": "auto"},
+)
+```
+
+For already-loaded objects use `adapt_vision_language(model_type, model,
+processor)`. Supported aliases include `qwen`, `qwen2_5_vl`, `llava-next`, and
+`llava-1.5`.
+
+### CHAIR Evaluation
+
+`mitigv.evaluation.chair` provides a strict, deterministic CHAIR evaluator
+using the bundled official synonym table. It reports per-image object details
+and 1000-resample image-level 95% bootstrap intervals for `CHAIRs`, `CHAIRi`,
+object recall, object F1, and mean word/sentence length. COCO files are read
+locally; the CLI defaults to `~/dataset/coco2017/annotations` and never
+downloads data:
+
+```bash
+python -m mitigv.evaluation.chair \
+  --generated-json outputs/captions.json \
+  --output-json outputs/chair.json
+```
+
+Prediction items must contain `image_id` and one of `caption`,
+`generated_text`, `text`, `answer`, or `output`. COCO ground truth is the union
+of instance categories and recognized objects in the reference captions.
+
+The supplementary double judge is available as `mitigv.evaluation.judge`. It calls
+DeepSeek (`deepseek-chat`, temperature 0, JSON response format) using the fixed
+prompt `mitigv/evaluation/prompts/extract_objects.txt`, caches by caption SHA-256, and
+verifies each extracted noun phrase with one resident GroundingDINO service.
+The default local COCO paths are under `~/dataset/coco2017`; it writes
+`results/judge.json` and a 500-image `results/judge_audit_sample.jsonl`.
+
+### Discriminative Evaluation
+
+`mitigv.evaluation.discriminative` evaluates POPE's `random`, `popular`, and
+`adversarial` subsets plus AMBER discriminative parquet files. It parses the
+first standalone `yes`/`no` token (including `Yes,` and `No.`), reports
+accuracy, precision, recall, F1, and emits one JSON detail row per question.
+`mitigv.evaluation.length_analysis` fits a Poisson model of image-level hallucination
+counts with description word count as a covariate, reports length-adjusted
+CHAIRi residual gains against a baseline configuration, and emits
+`length_chairi_scatter` points for plotting.
+
+The local AMBER discriminative files are under `~/dataset/AMBER`, for example
+`discriminative-existence-00000-of-00001.parquet`; predictions are supplied in
+the same row order as the parquet records.
 
 ### Module 4 — `mitigv.perturbations`
 
@@ -239,7 +388,7 @@ a no-image branch with a weight that *grows* over decoding steps, gated by the
 model's confidence:
 
 ```
-gamma_t   = exp(-lambda * t)
+gamma_t   = exp(-lambda * t)  # t=1 for the first predicted token
 weight_t  = (1 - gamma_t) / gamma_t
 logits    = l_c + 1[max(l_c) < log(alpha)] * weight_t * (l_c - l_u)
 ```
@@ -301,12 +450,12 @@ text = steer(images, prompt)
 
 `LinearProbeSteerConfig` adds `beta` (injection strength; scan `{2, 5, 8, 12}`)
 and `layer` (the decoder layer the probe was trained on). The probe is fit by
-`evaluators/train_probe.py` on ~2000 COCO images (~30 min, single GPU); no model
+`mitigv-train-probe` on ~2000 COCO images (~30 min, single GPU); no model
 weight is updated.
 
 ### Module 11 — `mitigv.algorithms.agla`
 
-**AGLA** (Assembly of Global and Local Attention, Zhou et al., 2024). Fuses the
+**AGLA** (Assembly of Global and Local Attention, An et al., 2025). Fuses the
 original image's generative global view with a saliency-cropped local view's
 discriminative logits:
 
@@ -377,15 +526,15 @@ via a cached look-ahead forward, and retrospection performs a real rollback
 
 ## Evaluation
 
-`evaluators/` contains a POPE evaluator that runs the library against the VCD
+`mitigv.evaluation` contains a POPE evaluator that runs the library against the VCD
 paper's reported numbers (Table 1, LLaVA-1.5-7B) and judges whether differences
 are ignorable:
 
 ```bash
-PYTHONPATH=src python -m evaluators.run_pope --device cuda:2 --limit 500
+mitigv-pope --device cuda:2 --limit 500
 ```
 
-`evaluators/pope.py` provides the reference table, metric computation (matching
+`mitigv/evaluation/pope.py` provides the reference table, metric computation (matching
 the official `eval_pope.py`) and the `compare_to_reference` verdict helper.
 
 ## Layout
@@ -396,10 +545,15 @@ src/mitigv/
   core/
     __init__.py
     base.py            # module 1: MitigatorConfig + BaseMitigator
+    interfaces.py      # structural model/processor contracts
     registry.py        # module 2: registration + build_mitigator
   backends/
     __init__.py
-    hf.py              # module 3: HFMitigator decoding skeleton
+    generic.py         # framework-neutral decoding backend
+    factory.py         # model-family selection and loading
+    hf_common.py       # shared Transformers adapter parents
+    llava.py           # HuggingFace LLaVA adapters
+    qwen2_5_vl.py      # HuggingFace Qwen2.5-VL adapters
   perturbations.py     # module 4: image distortion operators
   algorithms/
     __init__.py
@@ -412,15 +566,20 @@ src/mitigv/
     agla.py            # module 11: AGLA (Assembly of Global and Local Attention)
     only.py            # module 12: ONLY (One-Layer Intervention)
     opera.py           # module 13: OPERA (Over-trust Penalty + Retrospection)
-  api.py               # mitigate() context manager
-evaluators/
-  pope.py              # POPE metrics + paper reference + verdict
-  run_pope.py          # end-to-end POPE validation driver
-  train_probe.py       # linear object-presence probe training (LinearProbeSteer)
+  evaluation/
+    chair.py           # strict CHAIR + bootstrap confidence intervals
+    pope.py            # POPE metrics + paper reference
+    discriminative.py  # POPE + AMBER yes/no evaluation
+    length_analysis.py # Poisson length-control analysis
+    judge.py           # DeepSeek + GroundingDINO supplementary judge
+    train_probe.py     # linear object-presence probe training
+    data/               # packaged CHAIR synonyms
+    prompts/            # packaged evaluator prompts
+  api.py               # load_mitigator() + mitigate()
 tests/
   test_base.py
   test_registry.py
-  test_hf.py
+  test_generic.py
   test_perturbations.py
   test_vcd.py
   test_icd.py

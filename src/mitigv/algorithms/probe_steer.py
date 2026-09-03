@@ -12,7 +12,7 @@ steer toward that direction::
 where ``w`` is the probe's weight vector and ``beta`` the injection strength
 (scan ``{2, 5, 8, 12}``). Training does not update any model weight — only a
 linear head is fit on frozen features — so the method stays training-free w.r.t.
-the LVLM. See ``evaluators/train_probe.py`` for the probe-fitting script.
+the LVLM. Use the ``mitigv-train-probe`` command to fit the probe.
 """
 
 from __future__ import annotations
@@ -21,14 +21,14 @@ from typing import Any
 
 import torch
 
-from mitigv.backends.hf import HFMitigator, HFMitigatorConfig
+from mitigv.backends.generic import GenericMitigator, GenericMitigatorConfig
 from mitigv.core.base import MitigatorConfigError
 from mitigv.core.registry import register_mitigator
 
 __all__ = ["LinearProbeSteerConfig", "LinearProbeSteer"]
 
 
-class LinearProbeSteerConfig(HFMitigatorConfig):
+class LinearProbeSteerConfig(GenericMitigatorConfig):
     """Hyper-parameters for LinearProbeSteer.
 
     Attributes:
@@ -50,7 +50,7 @@ class LinearProbeSteerConfig(HFMitigatorConfig):
 
 
 @register_mitigator("linear_probe_steer")
-class LinearProbeSteer(HFMitigator):
+class LinearProbeSteer(GenericMitigator):
     """Steer decoding with a linear probe's decision normal.
 
     ``steering_vector`` is the probe's (unnormalized or normalized) weight
@@ -76,8 +76,21 @@ class LinearProbeSteer(HFMitigator):
         if cfg.beta == 0.0 or self.steering_vector is None:
             return
 
-        vec = self.steering_vector.to(device=self.device, dtype=self.dtype or torch.float32)
-        vec = vec / (vec.norm() + 1e-12)  # unit decision normal
+        if not isinstance(self.steering_vector, torch.Tensor):
+            raise MitigatorConfigError("steering_vector must be a torch.Tensor")
+        if self.steering_vector.ndim != 1:
+            raise MitigatorConfigError("steering_vector must have shape (hidden_dim,)")
+        vec = self.steering_vector.to(
+            device=self.device, dtype=self.dtype or torch.float32
+        )
+        if not bool(torch.isfinite(vec).all()):
+            raise MitigatorConfigError(
+                "steering_vector must contain only finite values"
+            )
+        norm = vec.norm()
+        if float(norm) == 0.0:
+            raise MitigatorConfigError("steering_vector must have a non-zero norm")
+        vec = vec / norm  # unit decision normal
 
         layers = self._language_model_layers()
         if cfg.layer >= len(layers):
@@ -87,7 +100,8 @@ class LinearProbeSteer(HFMitigator):
         strength = cfg.beta
 
         def hook(module: Any, args: Any, output: Any) -> Any:
-            return output + strength * vec.view(1, 1, -1)
+            delta = strength * vec.view(1, 1, -1)
+            return self._add_to_layer_output(output, delta)
 
         self._steer_hooks.append(layers[cfg.layer].register_forward_hook(hook))
 

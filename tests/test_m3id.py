@@ -53,14 +53,21 @@ class CondUncondModel(torch.nn.Module):
         self.calls = []
         self.reorder_calls = []
 
-    def forward(self, input_ids=None, attention_mask=None, past_key_values=None,
-                use_cache=True, return_dict=True, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+        **kwargs,
+    ):
         self.calls.append("pixel_values" in kwargs)
         vec = self.cond_vec if "pixel_values" in kwargs else self.uncond_vec
-        b, l = input_ids.shape
-        logits = vec.view(1, 1, -1).expand(b, l, -1)
+        batch_size, seq_len = input_ids.shape
+        logits = vec.view(1, 1, -1).expand(batch_size, seq_len, -1)
         step = 0 if past_key_values is None else int(past_key_values[0, 0].item()) + 1
-        cache = torch.full((b, 1), step, dtype=torch.long)
+        cache = torch.full((batch_size, 1), step, dtype=torch.long)
         return SimpleNamespace(logits=logits, past_key_values=cache)
 
     def _reorder_cache(self, past_key_values, beam_idx):
@@ -84,8 +91,8 @@ class TestM3IDConfig:
 
 
 class TestStepWeight:
-    def test_zero_at_step_zero(self):
-        assert M3ID._step_weight(0, 0.02) == 0.0
+    def test_first_token_uses_paper_t_one(self):
+        assert M3ID._step_weight(0, math.log(2.0)) == pytest.approx(1.0)
 
     def test_grows_with_step(self):
         w0 = M3ID._step_weight(0, 0.02)
@@ -101,16 +108,19 @@ class TestM3ID:
     def test_registered_and_buildable(self):
         assert "m3id" in list_mitigators()
         m = build_mitigator(
-            "m3id", CondUncondModel([1, 0, 0, 0], [0, 1, 0, 0], 4),
-            M3idProcessor(VOCAB), max_new_tokens=1,
+            "m3id",
+            CondUncondModel([1, 0, 0, 0], [0, 1, 0, 0], 4),
+            M3idProcessor(VOCAB),
+            max_new_tokens=1,
         )
         assert isinstance(m, M3ID)
 
     def test_step_logits_contrast_when_gated(self):
-        # forget_rate = ln(2) -> step 1 weight == 1.0
+        # forget_rate = ln(2) -> first token (paper t=1) has weight 1.0
         model = CondUncondModel([0, 0, 0, 0], [0, 0, 1, 0], 4)
-        m3id = M3ID(model, M3idProcessor(VOCAB), alpha=0.3,
-                    forgetting_rate=math.log(2.0))
+        m3id = M3ID(
+            model, M3idProcessor(VOCAB), alpha=0.3, forgetting_rate=math.log(2.0)
+        )
 
         inputs = {
             "input_ids": torch.tensor([[0]]),
@@ -124,17 +134,18 @@ class TestM3ID:
         m3id._uncond_attention_mask = torch.ones((1, 1), dtype=torch.long)
         m3id._uncond_past = None
 
-        # step 1: uniform cond (top-1=0.25 < 0.3) -> gate on, weight=1
+        # step 0: uniform cond (top-1=0.25 < 0.3) -> gate on, weight=1
         logits, _ = m3id._step_logits(
-            inputs["input_ids"], inputs["attention_mask"], inputs, None, 1, m3id.config
+            inputs["input_ids"], inputs["attention_mask"], inputs, None, 0, m3id.config
         )
         # 2*l_c - l_u = 2*[0,0,0,0] - [0,0,1,0] = [0,0,-1,0]
         assert torch.allclose(logits, torch.tensor([[0.0, 0.0, -1.0, 0.0]]))
 
     def test_step_logits_no_contrast_when_confident(self):
         model = CondUncondModel([5, 0, 0, 0], [0, 0, 1, 0], 4)
-        m3id = M3ID(model, M3idProcessor(VOCAB), alpha=0.3,
-                    forgetting_rate=math.log(2.0))
+        m3id = M3ID(
+            model, M3idProcessor(VOCAB), alpha=0.3, forgetting_rate=math.log(2.0)
+        )
 
         inputs = {
             "input_ids": torch.tensor([[0]]),
@@ -163,11 +174,16 @@ class TestM3ID:
 
     def test_end_to_end_calls_both_after_step_zero(self):
         model = CondUncondModel([0, 5, 0, 0], [0, 0, 5, 0], 4)
-        m3id = M3ID(model, M3idProcessor(VOCAB), alpha=0.3,
-                    forgetting_rate=math.log(2.0), max_new_tokens=2)
+        m3id = M3ID(
+            model,
+            M3idProcessor(VOCAB),
+            alpha=0.3,
+            forgetting_rate=math.log(2.0),
+            max_new_tokens=2,
+        )
         m3id(torch.zeros(1, 1), "a")
-        # step 0 (weight 0): 1 cond call; step 1 (weight 1): cond + uncond = 3 total
-        assert len(model.calls) == 3
+        # Both branches advance from the first predicted token onward.
+        assert len(model.calls) == 4
 
     def test_beam_search_and_aux_reorder(self):
         model = CondUncondModel([5, 0, 0, 0], [0, 0, 5, 0], 4)
@@ -181,9 +197,15 @@ class TestM3ID:
                 self.aux_calls.append(beam_idx.clone())
                 super()._reorder_aux_cache(beam_idx)
 
-        m3id = SpyM3ID(model, M3idProcessor(VOCAB), alpha=0.3,
-                       forgetting_rate=math.log(2.0),
-                       num_beams=2, num_return_sequences=2, max_new_tokens=2)
+        m3id = SpyM3ID(
+            model,
+            M3idProcessor(VOCAB),
+            alpha=0.3,
+            forgetting_rate=math.log(2.0),
+            num_beams=2,
+            num_return_sequences=2,
+            max_new_tokens=2,
+        )
         out = m3id(torch.zeros(1, 1), "a")
         assert isinstance(out, list) and len(out) == 2
         assert len(m3id.aux_calls) >= 1

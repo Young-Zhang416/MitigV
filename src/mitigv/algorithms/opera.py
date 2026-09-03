@@ -27,14 +27,14 @@ from typing import Any
 
 import torch
 
-from mitigv.backends.hf import HFMitigator, HFMitigatorConfig
+from mitigv.backends.generic import GenericMitigator, GenericMitigatorConfig
 from mitigv.core.base import MitigatorConfigError
 from mitigv.core.registry import register_mitigator
 
 __all__ = ["OPERAConfig", "OPERA"]
 
 
-class OPERAConfig(HFMitigatorConfig):
+class OPERAConfig(GenericMitigatorConfig):
     """Hyper-parameters for OPERA (paper defaults).
 
     Attributes:
@@ -78,14 +78,16 @@ class OPERAConfig(HFMitigatorConfig):
 
 
 @register_mitigator("opera")
-class OPERA(HFMitigator):
+class OPERA(GenericMitigator):
     """Over-trust Penalty and Retrospection-Allocation beam search."""
 
     algorithm_name = "opera"
     config_class = OPERAConfig
 
     # -- setup -----------------------------------------------------------------
-    def _prepare_inputs(self, images: Any, prompt: str, cfg: OPERAConfig) -> dict[str, Any]:
+    def _prepare_inputs(
+        self, images: Any, prompt: str, cfg: OPERAConfig
+    ) -> dict[str, Any]:
         inputs = super()._prepare_inputs(images, prompt, cfg)
         self._response_start = inputs["input_ids"].shape[1]
         return inputs
@@ -148,7 +150,9 @@ class OPERA(HFMitigator):
             [OPERA._align_row(r, kv_len)[:, -k:] for r in rows], dim=1
         ).to(torch.float32)
         window = cols * sigma  # (B, k, k)
-        col_prod = torch.ones((window.shape[0], k), dtype=torch.float32, device=window.device)
+        col_prod = torch.ones(
+            (window.shape[0], k), dtype=torch.float32, device=window.device
+        )
         for j in range(k):
             col_prod[:, j] = window[:, j:, j].prod(dim=1)
         penalty, argmax_local = col_prod.max(dim=-1)
@@ -160,6 +164,14 @@ class OPERA(HFMitigator):
                 return int(past.get_seq_length())
             except Exception:
                 pass
+        # Legacy transformers caches are tuples of per-layer ``(key, value)``
+        # tensors whose penultimate dimension is the cached sequence length.
+        try:
+            first_key = past[0][0]
+            if isinstance(first_key, torch.Tensor) and first_key.ndim >= 2:
+                return int(first_key.shape[-2])
+        except (IndexError, TypeError):
+            pass
         return fallback
 
     def _clone_cache(self, cache: Any) -> Any:
@@ -170,10 +182,8 @@ class OPERA(HFMitigator):
     ) -> torch.Tensor:
         """Append ``token`` to beam ``beam_idx``'s cache and return its attention row."""
         cache = self._clone_cache(past)
-        try:
-            cache.batch_select_indices(torch.tensor([beam_idx], device=device))
-        except Exception:
-            pass
+        index = torch.tensor([beam_idx], dtype=torch.long, device=device)
+        cache = self._reorder_cache(cache, index)
         self._attn_capture = None
         self.model(
             input_ids=torch.tensor([[token]], dtype=torch.long, device=device),
@@ -183,7 +193,9 @@ class OPERA(HFMitigator):
         )
         attn = self._attn_capture
         if attn is None:
-            return torch.zeros(kv_len + 1, device=device)
+            raise RuntimeError(
+                "OPERA candidate look-ahead did not produce attention weights"
+            )
         row = self._process_attention(attn)[:, -1, :]  # (1, kv_len+1)
         return self._align_row(row, kv_len + 1)[0]  # (kv_len+1,)
 
@@ -200,7 +212,7 @@ class OPERA(HFMitigator):
         next token that must be excluded on re-allocation.
         """
         for b in range(len(self._penalty_columns)):
-            cols = self._penalty_columns[b][-cfg.retrospection_window:]
+            cols = self._penalty_columns[b][-cfg.retrospection_window :]
             if len(cols) < cfg.threshold:
                 continue
             pos, count = Counter(cols).most_common(1)[0]
@@ -216,8 +228,15 @@ class OPERA(HFMitigator):
         return None
 
     # -- beam search -----------------------------------------------------------
-    def _beam_search_loop(self, inputs: dict[str, Any], cfg: OPERAConfig) -> torch.Tensor:
+    def _beam_search_loop(
+        self, inputs: dict[str, Any], cfg: OPERAConfig
+    ) -> torch.Tensor:
         batch_size = inputs["input_ids"].shape[0]
+        if batch_size != 1:
+            raise NotImplementedError(
+                "OPERA currently requires batch_size=1 because retrospection "
+                "maintains a single synchronized rollback timeline"
+            )
         num_beams = cfg.num_beams
         num_return = cfg.num_return_sequences
         device = self.device
@@ -230,12 +249,16 @@ class OPERA(HFMitigator):
         attention_mask = beam_inputs.get("attention_mask")
         full_ids = input_ids
 
-        beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=device)
+        beam_scores = torch.zeros(
+            (batch_size, num_beams), dtype=torch.float, device=device
+        )
         beam_scores[:, 1:] = -1e9
         beam_scores = beam_scores.view(-1)
 
         is_done = torch.zeros(n_beams, dtype=torch.bool, device=device)
-        finished: list[list[tuple[float, torch.Tensor]]] = [[] for _ in range(batch_size)]
+        finished: list[list[tuple[float, torch.Tensor]]] = [
+            [] for _ in range(batch_size)
+        ]
         past = None
         kv_len = prompt_len
 
@@ -246,16 +269,34 @@ class OPERA(HFMitigator):
 
         # snapshots for retrospection: n_generated_tokens -> full state
         snapshots: dict[int, tuple] = {
-            0: self._snapshot(full_ids, beam_scores, past, is_done, attention_mask)
+            0: self._snapshot(
+                full_ids, beam_scores, past, is_done, attention_mask, finished
+            )
         }
 
         step = 0
         while step < cfg.max_new_tokens:
-            if cfg.early_stopping and all(len(f) >= num_return for f in finished):
+            if cfg.early_stopping and all(len(f) >= num_beams for f in finished):
                 break
 
-            logits, past, attn = self._step_forward(input_ids, attention_mask, beam_inputs, past)
-            kv_len = self._kv_len(past, kv_len + 1)
+            logits, past, attn = self._step_forward(
+                input_ids, attention_mask, beam_inputs, past
+            )
+            if attn is None:
+                raise RuntimeError("OPERA decoding did not produce attention weights")
+            if past is None:
+                raise RuntimeError(
+                    "model did not return past_key_values with use_cache=True; "
+                    "OPERA requires a cache for candidate look-ahead"
+                )
+            # ``kv_len`` already tracks the length expected *after* this
+            # forward: prompt length at prefill, then +1 per selected token.
+            kv_len = self._kv_len(past, kv_len)
+            if step == 0:
+                # Multimodal models may expand one image placeholder into
+                # hundreds of KV positions during prefill.
+                self._response_start = kv_len
+            self._validate_next_token_logits(logits)
             row = self._align_row(self._process_attention(attn)[:, -1, :], kv_len)
             for b in range(row.shape[0]):
                 self._attn_history[b].append(row[b].detach())
@@ -264,7 +305,7 @@ class OPERA(HFMitigator):
             vocab_size = logits.shape[-1]
 
             # candidate-level penalty via cached look-ahead
-            cand_scores: list[tuple[float, int, int]] = []
+            cand_scores: list[tuple[float, int, int, int]] = []
             for b in range(n_beams):
                 if bool(is_done[b]):
                     continue
@@ -275,13 +316,17 @@ class OPERA(HFMitigator):
                     if tok in excluded[b]:
                         continue
                     c_row = self._lookahead_row(b, tok, past, kv_len, device)
-                    penalty, _ = self._compute_penalty(
-                        (self._attn_history[b] + [c_row])[-cfg.window_size:],
+                    penalty, penalty_col = self._compute_penalty(
+                        (self._attn_history[b] + [c_row])[-cfg.window_size :],
                         kv_len + 1,
                         cfg.sigma,
                     )
-                    score = sc + float(beam_scores[b]) - cfg.penalty_weight * float(penalty[0])
-                    cand_scores.append((score, b, tok))
+                    score = (
+                        sc
+                        + float(beam_scores[b])
+                        - cfg.penalty_weight * float(penalty[0])
+                    )
+                    cand_scores.append((score, b, tok, int(penalty_col[0])))
 
             if not cand_scores:
                 break
@@ -292,9 +337,15 @@ class OPERA(HFMitigator):
             if rb is not None:
                 b, target_len, exclude_token = rb
                 if target_len in snapshots and target_len < len(self._chosen_tokens[b]):
-                    full_ids, beam_scores, past, is_done, attention_mask = self._restore(
-                        snapshots[target_len]
-                    )
+                    (
+                        full_ids,
+                        beam_scores,
+                        past,
+                        is_done,
+                        attention_mask,
+                        finished,
+                    ) = self._restore(snapshots[target_len])
+                    n_beams = full_ids.shape[0]
                     excluded = [set() for _ in range(n_beams)]
                     if exclude_token is not None:
                         excluded[b] = {exclude_token}
@@ -308,8 +359,9 @@ class OPERA(HFMitigator):
             new_beam_indices: list[int] = []
             new_token_ids: list[int] = []
             new_scores: list[float] = []
+            new_penalty_columns: list[int] = []
             seen: set[tuple[int, int]] = set()
-            for score, b, tok in cand_scores:
+            for score, b, tok, penalty_col in cand_scores:
                 if len(new_token_ids) >= n_beams:
                     break
                 if (b, tok) in seen:
@@ -319,22 +371,27 @@ class OPERA(HFMitigator):
                     batch = b // num_beams
                     seq = full_ids[b, prompt_len:].clone()
                     cur_len = seq.numel() + 1
-                    finished[batch].append((score / (cur_len ** cfg.length_penalty), seq))
+                    finished[batch].append((score / (cur_len**cfg.length_penalty), seq))
                     continue
                 new_beam_indices.append(b)
                 new_token_ids.append(tok)
                 new_scores.append(score)
+                new_penalty_columns.append(penalty_col)
 
             if not new_beam_indices:
                 break
 
             beam_idx = torch.tensor(new_beam_indices, dtype=torch.long, device=device)
-            next_token_t = torch.tensor(new_token_ids, dtype=torch.long, device=device).unsqueeze(1)
+            next_token_t = torch.tensor(
+                new_token_ids, dtype=torch.long, device=device
+            ).unsqueeze(1)
             beam_scores = torch.tensor(new_scores, dtype=torch.float, device=device)
 
             full_ids = torch.cat([full_ids[beam_idx], next_token_t], dim=-1)
             if attention_mask is not None:
-                ones = torch.ones((len(beam_idx), 1), dtype=attention_mask.dtype, device=device)
+                ones = torch.ones(
+                    (len(beam_idx), 1), dtype=attention_mask.dtype, device=device
+                )
                 attention_mask = torch.cat([attention_mask[beam_idx], ones], dim=-1)
 
             past = self._reorder_cache(past, beam_idx)
@@ -342,26 +399,45 @@ class OPERA(HFMitigator):
             is_done = is_done[beam_idx]
 
             self._attn_history = [self._attn_history[b] for b in new_beam_indices]
-            self._penalty_columns = [self._penalty_columns[b] for b in new_beam_indices]
-            self._chosen_tokens = [
-                self._chosen_tokens[b] + [t] for b, t in zip(new_beam_indices, new_token_ids)
+            self._penalty_columns = [
+                self._penalty_columns[b] + [column]
+                for b, column in zip(new_beam_indices, new_penalty_columns)
             ]
+            self._chosen_tokens = [
+                self._chosen_tokens[b] + [t]
+                for b, t in zip(new_beam_indices, new_token_ids)
+            ]
+            n_beams = len(new_beam_indices)
+            # A rollback exclusion applies only to the reallocated next token.
+            excluded = [set() for _ in range(n_beams)]
 
             input_ids = next_token_t
             kv_len += 1
             step += 1
-            snapshots[step] = self._snapshot(full_ids, beam_scores, past, is_done, attention_mask)
+            snapshots[step] = self._snapshot(
+                full_ids, beam_scores, past, is_done, attention_mask, finished
+            )
             # prune snapshots older than max_rollback
             if len(snapshots) > cfg.max_rollback:
                 oldest = min(snapshots)
                 del snapshots[oldest]
 
         return self._finalize_beams(
-            finished, full_ids, beam_scores, is_done, prompt_len,
-            batch_size, num_beams, num_return, cfg, device,
+            finished,
+            full_ids,
+            beam_scores,
+            is_done,
+            prompt_len,
+            batch_size,
+            n_beams,
+            num_return,
+            cfg,
+            device,
         )
 
-    def _snapshot(self, full_ids, beam_scores, past, is_done, attention_mask) -> tuple:
+    def _snapshot(
+        self, full_ids, beam_scores, past, is_done, attention_mask, finished
+    ) -> tuple:
         return (
             full_ids.clone(),
             beam_scores.clone(),
@@ -371,11 +447,28 @@ class OPERA(HFMitigator):
             [[r.clone() for r in h] for h in self._attn_history],
             [list(c) for c in self._penalty_columns],
             [list(t) for t in self._chosen_tokens],
+            [
+                [(score, tokens.clone()) for score, tokens in group]
+                for group in finished
+            ],
         )
 
     def _restore(self, snap: tuple) -> tuple:
-        (full_ids, beam_scores, past, is_done, attention_mask, history, columns, chosen) = snap
+        (
+            full_ids,
+            beam_scores,
+            past,
+            is_done,
+            attention_mask,
+            history,
+            columns,
+            chosen,
+            finished,
+        ) = snap
         self._attn_history = [[r.clone() for r in h] for h in history]
         self._penalty_columns = [list(c) for c in columns]
         self._chosen_tokens = [list(t) for t in chosen]
-        return full_ids, beam_scores, past, is_done, attention_mask
+        restored_finished = [
+            [(score, tokens.clone()) for score, tokens in group] for group in finished
+        ]
+        return full_ids, beam_scores, past, is_done, attention_mask, restored_finished

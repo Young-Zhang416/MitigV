@@ -21,14 +21,14 @@ from typing import Any
 
 import torch
 
-from mitigv.backends.hf import HFMitigator, HFMitigatorConfig
+from mitigv.backends.generic import GenericMitigator, GenericMitigatorConfig
 from mitigv.core.base import MitigatorConfigError
 from mitigv.core.registry import register_mitigator
 
 __all__ = ["ONLYConfig", "ONLY"]
 
 
-class ONLYConfig(HFMitigatorConfig):
+class ONLYConfig(GenericMitigatorConfig):
     """Hyper-parameters for ONLY.
 
     Attributes:
@@ -55,7 +55,7 @@ class ONLYConfig(HFMitigatorConfig):
 
 
 @register_mitigator("only")
-class ONLY(HFMitigator):
+class ONLY(GenericMitigator):
     """One-Layer Intervention (TVER head selection + adaptive fusion).
 
     The first forward records the selected layer's attention (used to compute
@@ -67,9 +67,13 @@ class ONLY(HFMitigator):
     config_class = ONLYConfig
 
     # -- input preparation -----------------------------------------------------
-    def _prepare_inputs(self, images: Any, prompt: str, cfg: ONLYConfig) -> dict[str, Any]:
+    def _prepare_inputs(
+        self, images: Any, prompt: str, cfg: ONLYConfig
+    ) -> dict[str, Any]:
         inputs = super()._prepare_inputs(images, prompt, cfg)
-        self._img_start, self._img_end = self._image_token_span(inputs)
+        self._img_spans = self._image_token_spans(inputs)
+        if bool(self._img_spans[:, 0].eq(self._img_spans[:, 1]).any()):
+            raise ValueError("ONLY could not locate image tokens in every batch row")
         self._mask_active = False
         self._masked_past = None
         self._patched_layer = None
@@ -77,22 +81,48 @@ class ONLY(HFMitigator):
         return inputs
 
     def _image_token_span(self, inputs: dict[str, Any]) -> tuple[int, int]:
+        spans = self._image_token_spans(inputs)
+        if spans.shape[0] > 1 and not bool(spans.eq(spans[0]).all()):
+            raise RuntimeError("batch rows have different image-token spans")
+        return int(spans[0, 0]), int(spans[0, 1])
+
+    def _image_token_spans(self, inputs: dict[str, Any]) -> torch.Tensor:
         config = getattr(self.model, "config", None)
         token = getattr(config, "image_token_index", None)
+        input_ids = inputs["input_ids"]
+        spans = torch.zeros(
+            (input_ids.shape[0], 2), dtype=torch.long, device=input_ids.device
+        )
         if token is None:
-            return 0, 0
-        positions = (inputs["input_ids"] == token).nonzero(as_tuple=False)
-        if positions.numel() == 0:
-            return 0, 0
-        cols = positions[:, 1]
-        return int(cols.min().item()), int(cols.max().item()) + 1
+            return spans
+        image_seq_length = getattr(config, "image_seq_length", None)
+        if not image_seq_length:
+            vision = getattr(config, "vision_config", None)
+            image_size = getattr(vision, "image_size", None)
+            patch_size = getattr(vision, "patch_size", None)
+            if image_size and patch_size:
+                image_seq_length = (int(image_size) // int(patch_size)) ** 2
+        for row in range(input_ids.shape[0]):
+            cols = (input_ids[row] == token).nonzero(as_tuple=False).flatten()
+            if cols.numel() == 0:
+                continue
+            if cols.numel() > 1 and not bool(cols.diff().eq(1).all()):
+                raise ValueError("ONLY does not support disjoint image-token spans")
+            start = int(cols.min())
+            end = int(cols.max()) + 1
+            if cols.numel() == 1 and image_seq_length:
+                end = start + int(image_seq_length)
+            spans[row] = torch.tensor((start, end), device=input_ids.device)
+        return spans
 
     # -- attention patch -------------------------------------------------------
     def _on_generate_start(self, cfg: ONLYConfig) -> None:
         self._force_eager_attention()
         layers = self._language_model_layers()
         if cfg.layer >= len(layers):
-            raise MitigatorConfigError(f"layer {cfg.layer} out of range for {len(layers)} layers")
+            raise MitigatorConfigError(
+                f"layer {cfg.layer} out of range for {len(layers)} layers"
+            )
         attn = layers[cfg.layer].self_attn
         self._patched_layer = attn
         self._attn_original = attn.forward
@@ -123,14 +153,26 @@ class ONLY(HFMitigator):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             input_shape = hidden_states.shape[:-1]
             hidden_shape = (*input_shape, -1, attn_module.head_dim)
-            query_states = attn_module.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            key_states = attn_module.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            value_states = attn_module.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            query_states = (
+                attn_module.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            )
+            key_states = (
+                attn_module.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            )
+            value_states = (
+                attn_module.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            )
 
             cos, sin = position_embeddings
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
             if past_key_values is not None:
-                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                cache_kwargs = {
+                    "sin": sin,
+                    "cos": cos,
+                    "cache_position": cache_position,
+                }
                 key_states, value_states = past_key_values.update(
                     key_states, value_states, attn_module.layer_idx, cache_kwargs
                 )
@@ -138,7 +180,10 @@ class ONLY(HFMitigator):
             key_states = repeat_kv(key_states, attn_module.num_key_value_groups)
             value_states = repeat_kv(value_states, attn_module.num_key_value_groups)
 
-            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * attn_module.scaling
+            attn_weights = (
+                torch.matmul(query_states, key_states.transpose(2, 3))
+                * attn_module.scaling
+            )
             if attention_mask is not None:
                 attn_weights = attn_weights + attention_mask
             attn_weights = torch.nn.functional.softmax(
@@ -146,8 +191,12 @@ class ONLY(HFMitigator):
             ).to(query_states.dtype)
 
             if pai._mask_active and pai._selected_mask is not None:
-                attn_weights = attn_weights.clone()
-                attn_weights[:, pai._selected_mask] = 0.0
+                selected = pai._selected_mask
+                if selected.shape != attn_weights.shape[:2]:
+                    raise RuntimeError(
+                        "ONLY head mask does not match the current attention batch"
+                    )
+                attn_weights = attn_weights.masked_fill(selected[:, :, None, None], 0.0)
 
             pai._last_attn = attn_weights  # (B, H, q, kv) post-softmax
 
@@ -160,22 +209,59 @@ class ONLY(HFMitigator):
         return forward
 
     # -- TVER ------------------------------------------------------------------
-    def _compute_selected_mask(self, attention: torch.Tensor, cfg: ONLYConfig) -> torch.Tensor:
+    def _compute_selected_mask(
+        self, attention: torch.Tensor, cfg: ONLYConfig
+    ) -> torch.Tensor:
         """Return a boolean mask over heads: True for *deactivated* heads."""
-        if self._img_end <= self._img_start:
-            return torch.zeros(attention.shape[1], dtype=torch.bool, device=attention.device)
-        a_v = attention[:, :, -1, self._img_start : self._img_end]  # (B, H, n_v)
-        text_mask = torch.ones(attention.shape[-1], dtype=torch.bool, device=attention.device)
-        text_mask[self._img_start : self._img_end] = False
-        a_t = attention[:, :, -1, text_mask]  # (B, H, n_t)
 
         def entropy(a: torch.Tensor) -> torch.Tensor:
-            a = a + 1e-12
-            return -(a * a.log()).sum(dim=-1)
+            # The paper computes entropy inside each modality, so restricted
+            # attention mass must be normalized again. Suppress attention-sink
+            # outliers as done by the reference implementation first.
+            threshold = a.mean(dim=-1, keepdim=True) + a.std(
+                dim=-1, keepdim=True, unbiased=False
+            )
+            filtered = torch.where(a > threshold, torch.zeros_like(a), a)
+            probs = filtered / filtered.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            return -(probs * probs.clamp_min(1e-12).log()).sum(dim=-1)
 
-        tver = entropy(a_t) / entropy(a_v)  # (B, H)
-        mean = tver.mean(dim=-1, keepdim=True)
-        return (tver < mean)[0]  # (H,) boolean mask of deactivated heads (row 0)
+        spans = getattr(self, "_img_spans", None)
+        if spans is None:
+            # Backward-compatible path for subclasses/tests that set the old
+            # scalar attributes directly.
+            start = getattr(self, "_img_start", 0)
+            end = getattr(self, "_img_end", 0)
+            spans = torch.tensor(
+                [[start, end]] * attention.shape[0], device=attention.device
+            )
+        if spans.shape[0] != attention.shape[0]:
+            raise RuntimeError(
+                "ONLY image-token spans do not match the attention batch"
+            )
+
+        selected: list[torch.Tensor] = []
+        for row, (start_t, end_t) in enumerate(spans.tolist()):
+            start = max(0, int(start_t))
+            end = min(int(end_t), attention.shape[-1])
+            if end <= start:
+                selected.append(
+                    torch.zeros(
+                        attention.shape[1], dtype=torch.bool, device=attention.device
+                    )
+                )
+                continue
+            a_v = attention[row, :, -1, start:end]
+            text_mask = torch.ones(
+                attention.shape[-1], dtype=torch.bool, device=attention.device
+            )
+            text_mask[start:end] = False
+            a_t = attention[row, :, -1, text_mask]
+            entropy_text = entropy(a_t)
+            entropy_image = entropy(a_v)
+            tver = entropy_text / entropy_image.clamp_min(1e-12)
+            tver = torch.nan_to_num(tver, nan=0.0, posinf=0.0, neginf=0.0)
+            selected.append(tver < tver.mean())
+        return torch.stack(selected)
 
     # -- intervention -----------------------------------------------------------
     def _step_logits(
@@ -189,7 +275,9 @@ class ONLY(HFMitigator):
     ) -> tuple[torch.Tensor, Any]:
         # 1) original forward (records attention at the patched layer)
         self._mask_active = False
-        logits_f, past = self._forward(input_ids, attention_mask, inputs, past_key_values)
+        logits_f, past = self._forward(
+            input_ids, attention_mask, inputs, past_key_values
+        )
         attention = self._last_attn
 
         # 2) select low-TVER heads, then re-run with them deactivated
@@ -228,8 +316,12 @@ class ONLY(HFMitigator):
         )
 
     # -- beam search ---------------------------------------------------------
-    def _expand_inputs_for_beams(self, inputs: dict[str, Any], num_beams: int) -> dict[str, Any]:
-        return super()._expand_inputs_for_beams(inputs, num_beams)
+    def _expand_inputs_for_beams(
+        self, inputs: dict[str, Any], num_beams: int
+    ) -> dict[str, Any]:
+        expanded = super()._expand_inputs_for_beams(inputs, num_beams)
+        self._img_spans = self._img_spans.repeat_interleave(num_beams, dim=0)
+        return expanded
 
     def _reorder_aux_cache(self, beam_idx: torch.Tensor) -> None:
         self._masked_past = self._reorder_cache(self._masked_past, beam_idx)
