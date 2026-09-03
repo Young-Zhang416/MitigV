@@ -18,7 +18,14 @@ def _load_records(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path).expanduser()
     with source.open("r", encoding="utf-8") as handle:
         value = json.load(handle)
-    records = _items(value, "input records") if not isinstance(value, list) else value
+    if isinstance(value, Mapping) and {
+        "image_id", "file_name", "gt_objects"
+    }.issubset(value):
+        records = [value]
+    elif isinstance(value, list):
+        records = value
+    else:
+        records = _items(value, "input records")
     if not records or not all(isinstance(item, Mapping) for item in records):
         raise ValueError("input JSON must contain a non-empty list of objects")
     return [dict(item) for item in records]

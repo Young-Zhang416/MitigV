@@ -46,3 +46,14 @@ def test_pipeline_records_accept_wrapped_object(tmp_path):
     path = tmp_path / "records.json"
     path.write_text(json.dumps({"data": [{"image_id": 1, "file_name": "x.jpg", "gt_objects": ["cat"]}]}), encoding="utf-8")
     assert load_pipeline_records(path)[0]["image_id"] == 1
+
+
+def test_pipeline_records_accept_single_record_object(tmp_path):
+    path = tmp_path / "record.json"
+    path.write_text(
+        json.dumps({"image_id": 1, "file_name": "x.jpg", "gt_objects": ["cat"]}),
+        encoding="utf-8",
+    )
+    assert load_pipeline_records(path) == [
+        {"image_id": 1, "file_name": "x.jpg", "gt_objects": ["cat"]}
+    ]
