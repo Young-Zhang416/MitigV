@@ -139,7 +139,8 @@ result = evaluate_pipeline_json(
 )
 ```
 
-`gt_objects` 会直接作为每图的 COCO 对象集合，不需要额外 annotations。也可以用
+`gt_objects` 会直接作为每图的 COCO 对象集合，不需要额外 annotations；允许为空列表，
+表示该图没有可用的 GT 对象，此时描述中出现的物体都会计为 hallucinated。也可以用
 CLI 从本地 checkpoint 加载模型：
 
 ```bash

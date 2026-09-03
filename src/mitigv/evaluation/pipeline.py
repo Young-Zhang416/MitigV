@@ -99,6 +99,8 @@ def evaluate_pipeline_json(
     """Generate captions for records and evaluate strict CHAIR.
 
     Each record must contain ``image_id``, ``file_name`` and ``gt_objects``.
+    An empty ``gt_objects`` list is valid and represents an image with no
+    annotated objects; such captions are still evaluated for hallucinations.
     ``pipeline`` may be a MitigV mitigator (``pipeline(image, prompt)``) or a
     compatible callable accepting ``image=``/``text=``. The returned object
     includes generated captions, resolved paths, per-image CHAIR details and
@@ -130,8 +132,6 @@ def evaluate_pipeline_json(
             for item in objects
             if str(item).strip()
         }
-        if not ground_truth[image_id]:
-            raise ValueError(f"gt_objects for image_id={image_id} must not be empty")
         image_path = _resolve_image(str(record["file_name"]), image_root)
         with Image.open(image_path) as loaded:
             image = loaded.convert("RGB")

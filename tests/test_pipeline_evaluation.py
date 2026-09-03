@@ -57,3 +57,28 @@ def test_pipeline_records_accept_single_record_object(tmp_path):
     assert load_pipeline_records(path) == [
         {"image_id": 1, "file_name": "x.jpg", "gt_objects": ["cat"]}
     ]
+
+
+def test_pipeline_evaluation_accepts_empty_gt_objects(tmp_path):
+    image_path = tmp_path / "empty.jpg"
+    Image.new("RGB", (8, 8), "white").save(image_path)
+    input_path = tmp_path / "records.json"
+    input_path.write_text(
+        json.dumps(
+            [{"image_id": 1, "file_name": image_path.name, "gt_objects": []}]
+        ),
+        encoding="utf-8",
+    )
+
+    result = evaluate_pipeline_json(
+        input_path,
+        lambda image, prompt: "A dog.",
+        image_root=tmp_path,
+        bootstrap_samples=10,
+    )
+    detail = result["chair"]["details"][0]
+    assert detail["gt_objects"] == []
+    assert detail["recalled"] == []
+    assert detail["missed"] == []
+    assert detail["hallucinated"] == ["dog"]
+    assert result["chair"]["summary"]["CHAIRi"]["value"] == 1.0
