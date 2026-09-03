@@ -34,7 +34,7 @@ from mitigv.core import (
     register_mitigator,
 )
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 __all__ = [
     "BaseMitigator",
@@ -53,6 +53,12 @@ __all__ = [
     "register_mitigator",
     "mitigate",
     "load_mitigator",
+    "expand_parameter_grid",
+    "tune_mitigator",
+    "grid_search",
+    "auto_tune",
+    "analyze_frontier",
+    "write_frontier_report",
     # Lazily imported (backends pull in torch/transformers only on use):
     "ModelMitigator",
     "ModelMitigatorConfig",
@@ -120,6 +126,12 @@ _LAZY = {
     "get_processor_adapter": ("mitigv.backends", "get_processor_adapter"),
     "adapt_vision_language": ("mitigv.backends", "adapt_vision_language"),
     "load_vision_language": ("mitigv.backends", "load_vision_language"),
+    "expand_parameter_grid": ("mitigv.evaluation.tuning", "expand_parameter_grid"),
+    "tune_mitigator": ("mitigv.evaluation.tuning", "tune_mitigator"),
+    "grid_search": ("mitigv.evaluation.tuning", "grid_search"),
+    "auto_tune": ("mitigv.evaluation.tuning", "auto_tune"),
+    "analyze_frontier": ("mitigv.evaluation.frontier", "analyze_frontier"),
+    "write_frontier_report": ("mitigv.evaluation.frontier", "write_report"),
     "VCD": ("mitigv.algorithms.vcd", "VCD"),
     "VCDConfig": ("mitigv.algorithms.vcd", "VCDConfig"),
     "ICD": ("mitigv.algorithms.icd", "ICD"),

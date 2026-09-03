@@ -176,6 +176,65 @@ mitigv-length-analysis \
 
 判别式评测解析 `Yes`/`No` 变体并输出 accuracy、precision、recall、F1 和逐题明细；长度分析以词数为协变量拟合泊松模型，报告长度校正后的 CHAIRi 残差增益及散点数据。
 
+### 参数自动调优
+
+使用调参集（格式同上）和参数网格自动选择最优配置。每组参数都会重新创建
+mitigator，但模型权重只加载一次：
+
+```python
+from mitigv import load_mitigator, tune_mitigator
+
+base = load_mitigator(
+    "vcd", model_type="llava", model_id="~/checkpoints/llava-1.5-7b-hf",
+    max_new_tokens=64,
+)
+result = tune_mitigator(
+    "tuning.json", algorithm="vcd", model=base.model, processor=base.processor,
+    base_config=base.config,
+    param_grid={"alpha": [0.5, 1.0, 1.5], "beta": [0.0, 0.1]},
+    image_root="~/dataset", metric="CHAIRi",
+    output_json="results/tuning.json",
+)
+print(result["best_params"], result["best_score"])
+```
+
+`CHAIRi` 和 `CHAIRs` 默认取最小值，`object_f1`、`object_recall` 默认取最大值；
+也可以显式传入 `maximize=True` 或 `False`。命令行支持内联 JSON 或网格文件：
+
+```bash
+mitigv-tune --input-json tuning.json \
+  --param-grid '{"alpha":[0.5,1.0],"beta":[0,0.1]}' \
+  --algorithm vcd --model-type qwen2.5-vl \
+  --model-id ~/checkpoints/qwen2.5-vl-7b-instruct \
+  --output-json results/tuning.json
+```
+
+非 MitigV 运行时可传入 `pipeline_factory(params)`，由工厂返回可调用的图像描述
+pipeline；其余评测和结果格式不变。
+
+### 生成论文前沿图
+
+先用 `tune_mitigator(..., metric="object_f1")` 在第 501--800 张调参图上为每个
+发表方法选出配置；平凡基线的所有配置直接分别运行，不要调用调参器。把每个结果
+文件写入一个 manifest（每行一个 JSON 对象）：
+
+```json
+{"name":"temperature-0.7","kind":"baseline","dataset":"coco_val500","model":"llava","result":"coco/temp07.json"}
+{"name":"vcd","kind":"published","family":"contrastive","dataset":"coco_val500","model":"llava","result":"coco/vcd.json"}
+```
+
+然后运行：
+
+```bash
+python analysis/frontier.py --manifest results/expA_manifest.jsonl \
+  --output-dir results/expA --bootstrap-samples 1000 --seed 42
+```
+
+脚本按 `dataset/model` 自动生成 COCO、AMBER、LLaVA、Qwen 的分组结果，输出基线
+帕累托阶梯线及 bootstrap 置信带、发表方法置信椭圆、配对 bootstrap 的 Holm 校正
+结论和 `expA_report.md`。安装绘图依赖：
+`python -m pip install -e ".[eval,analysis]"`。
+
 ## 6. 实验建议与排错
 
 固定随机种子、记录完整配置和模型 checkpoint；比较算法时保持图像顺序及生成长度一致。若出现显存不足，降低 `max_new_tokens`、batch size 或 beam 数。若适配器提示缺少 `transformers`，确认安装了 `python -m pip install -e ".[transformers]"`。评测脚本只读取本地数据，API 密钥应通过环境变量提供，切勿提交到仓库。

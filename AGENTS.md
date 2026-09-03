@@ -8,6 +8,7 @@ MitigV is a Python (>=3.10) library using a `src/` layout:
 - `src/mitigv/algorithms/` contains decoding and steering implementations (VCD, ICD, PAI, M3ID, VISTA, AGLA, ONLY, OPERA, and probe steering).
 - `src/mitigv/backends/` contains the framework-neutral `GenericMitigator` plus shared vision-language adapters and model-family adapters (`llava.py`, `qwen2_5_vl.py`). Select families through `backends.factory`.
 - `src/mitigv/evaluation/` contains strict CHAIR, POPE/AMBER, DeepSeek + GroundingDINO, length-control analysis, CLI modules, and bundled prompts/data.
+- `analysis/` contains reproducible post-processing scripts, including the recall/CHAIRi frontier and report generator.
 - `tests/` mirrors these modules with focused pytest coverage.
 
 ## Build, Test, and Development Commands

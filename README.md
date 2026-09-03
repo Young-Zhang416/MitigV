@@ -317,6 +317,58 @@ The local AMBER discriminative files are under `~/dataset/AMBER`, for example
 `discriminative-existence-00000-of-00001.parquet`; predictions are supplied in
 the same row order as the parquet records.
 
+### Parameter Tuning
+
+`mitigv.evaluation.tuning.tune_mitigator` runs a deterministic Cartesian grid
+search on a tuning JSON file in the same `{image_id, file_name, gt_objects}`
+format accepted by `evaluate_pipeline_json`. The model and processor are loaded
+once; each candidate gets a fresh, validated mitigator. `CHAIRi`/`CHAIRs` are
+minimized by default, while `object_f1`/`object_recall` are maximized.
+
+```python
+from mitigv import load_mitigator, tune_mitigator
+
+base = load_mitigator("vcd", model_type="llava",
+                      model_id="~/checkpoints/llava-1.5-7b-hf",
+                      max_new_tokens=64)
+search = tune_mitigator(
+    "tuning.json", algorithm="vcd", model=base.model, processor=base.processor,
+    base_config=base.config,
+    param_grid={"alpha": [0.5, 1.0, 1.5], "beta": [0.0, 0.1]},
+    image_root="~/dataset", output_json="results/tuning.json",
+)
+print(search["best_params"], search["best_score"])
+```
+
+The `mitigv-tune` command accepts the same grid as an inline JSON object or a
+JSON file. Pass `metric="object_f1"` (or `maximize=True`/`False`) to change the
+selection criterion. For custom runtimes, provide `pipeline_factory(params)`
+instead of `algorithm`, `model`, and `processor`.
+
+### Recall/CHAIRi Frontier
+
+After generating one frozen evaluator JSON per method/configuration, create a
+JSONL manifest. Mark trivial baseline rows with `kind: "baseline"`; published
+rows use `kind: "published"` and a `family` for plot colors:
+
+```json
+{"name":"temperature-0.7","kind":"baseline","dataset":"coco_val500","model":"llava","result":"coco/temp07.json"}
+{"name":"vcd","kind":"published","family":"contrastive","dataset":"coco_val500","model":"llava","result":"coco/vcd.json"}
+```
+
+The analysis script resamples image IDs, computes the baseline Pareto staircase
+and 95% band, method bootstrap ellipses, paired tests, and Holm-corrected
+verdicts. It groups COCO/AMBER and LLaVA/Qwen rows automatically:
+
+```bash
+python analysis/frontier.py --manifest results/expA_manifest.jsonl \
+  --output-dir results/expA --bootstrap-samples 1000 --seed 42
+```
+
+This writes `frontier_analysis.json`, one PNG per dataset/model group, and
+`expA_report.md`. Install plotting support with
+`python -m pip install -e ".[eval,analysis]"`.
+
 ### Module 4 — `mitigv.perturbations`
 
 Image distortion operators, with a name-based registry so configs stay

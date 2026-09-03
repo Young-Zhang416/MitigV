@@ -26,6 +26,14 @@ __all__ = [
     "analyze_length_control",
     "load_pipeline_records",
     "evaluate_pipeline_json",
+    "expand_parameter_grid",
+    "tune_mitigator",
+    "grid_search",
+    "auto_tune",
+    "load_manifest",
+    "pareto_frontier",
+    "analyze_frontier",
+    "write_report",
 ]
 
 _LAZY = {
@@ -62,6 +70,14 @@ _LAZY = {
     ),
     "load_pipeline_records": ("mitigv.evaluation.pipeline", "load_pipeline_records"),
     "evaluate_pipeline_json": ("mitigv.evaluation.pipeline", "evaluate_pipeline_json"),
+    "expand_parameter_grid": ("mitigv.evaluation.tuning", "expand_parameter_grid"),
+    "tune_mitigator": ("mitigv.evaluation.tuning", "tune_mitigator"),
+    "grid_search": ("mitigv.evaluation.tuning", "grid_search"),
+    "auto_tune": ("mitigv.evaluation.tuning", "auto_tune"),
+    "load_manifest": ("mitigv.evaluation.frontier", "load_manifest"),
+    "pareto_frontier": ("mitigv.evaluation.frontier", "pareto_frontier"),
+    "analyze_frontier": ("mitigv.evaluation.frontier", "analyze_frontier"),
+    "write_report": ("mitigv.evaluation.frontier", "write_report"),
 }
 
 
